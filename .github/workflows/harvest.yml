@@ -23,7 +23,7 @@ jobs:
 
       - name: Download Common Crawl snapshot list
         run: |
-          curl -sS http://index.commoncrawl.org/collinfo.json -o collinfo.json
+          curl -sS https://index.commoncrawl.org/collinfo.json -o collinfo.json
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v1
