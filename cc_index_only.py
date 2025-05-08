@@ -28,7 +28,14 @@ PATTERNS = [
     "*.youtube.com/user/*",
     "*.youtube.com/+*",
 ]
-USER_AGENT         = "Mozilla/5.0 (compatible; IndexFetcher/1.0)"
+
+# Use a common browser User‑Agent so CC treats us like a regular browser
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/115.0.0.0 Safari/537.36"
+)
+
 DEFAULT_MAX_PAGES  = 10000
 DEFAULT_BATCH_SIZE = 500
 COLLINFO_URL       = "http://index.commoncrawl.org/collinfo.json"
@@ -85,8 +92,6 @@ def fetch_index_records(snapshot, pattern, page, retries=5):
     # Only allow '/', '@', '+' unencoded—percent-encode '*' and '.'
     enc = quote(pattern, safe="/@+")
     url = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
-    # debug print to verify encoding
-    print(f"DEBUG fetch URL: {url}", file=sys.stderr)
     headers = {"User-Agent": USER_AGENT}
     backoff = 1
 
