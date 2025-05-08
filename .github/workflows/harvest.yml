@@ -21,23 +21,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Fetch Common Crawl snapshot list via Python
-        run: |
-          python - <<'PYCODE'
-          import requests, json, time, sys
-          for i in range(5):
-              try:
-                  resp = requests.get("https://index.commoncrawl.org/collinfo.json", timeout=30)
-                  resp.raise_for_status()
-                  with open("collinfo.json","w") as f:
-                      json.dump(resp.json(), f)
-                  sys.exit(0)
-              except Exception as e:
-                  print(f"❗ attempt {i+1} failed: {e}", file=sys.stderr)
-                  time.sleep((i+1)*5)
-          print("❌ All attempts to fetch collinfo.json failed", file=sys.stderr)
-          sys.exit(1)
-          PYCODE
+      - name: Provide static snapshot list
+        run: cp collinfo.json collinfo.json
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v1
