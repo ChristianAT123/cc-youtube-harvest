@@ -87,14 +87,16 @@ def normalize_url(raw: str) -> str:
     return ""
 
 def fetch_index_records(snapshot, pattern, page, retries=5):
-    enc = quote(pattern, safe="*/@+")
+    # Allow *, /, ., @, + to remain unencoded
+    enc = quote(pattern, safe="*/.@+")
     url = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
     headers = {"User-Agent": USER_AGENT}
     backoff = 1
 
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(url, headers=headers, timeout=60)
+            # increase timeout to 120s
+            resp = requests.get(url, headers=headers, timeout=120)
             if resp.status_code == 400:
                 return []
             if resp.status_code == 429:
@@ -142,14 +144,12 @@ def main():
                 lines = fetch_index_records(snap, pattern, page)
                 if not lines:
                     break
-
                 batch = []
                 for line in lines:
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-
                     clean = normalize_url(rec.get("url", ""))
                     if not clean:
                         continue
@@ -158,11 +158,9 @@ def main():
                         seen.add(clean)
                         batch.append(clean)
                         total_new += 1
-
                     if len(batch) >= args.batch_size:
                         save_batch(client, table_ref, batch)
                         batch.clear()
-
                 if batch:
                     save_batch(client, table_ref, batch)
 
