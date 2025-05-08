@@ -21,6 +21,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Download Common Crawl snapshot list
+        run: |
+          curl -sS http://index.commoncrawl.org/collinfo.json -o collinfo.json
+
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v1
         with:
@@ -34,7 +38,8 @@ jobs:
       - name: Run harvest script
         run: |
           python cc_index_only.py \
-            --year    2024 \
-            --dataset ${{ secrets.BQ_DATASET }} \
-            --table   ${{ secrets.BQ_TABLE }} \
-            --project ${{ secrets.GCP_PROJECT }}
+            --year          2024 \
+            --dataset       ${{ secrets.BQ_DATASET }} \
+            --table         ${{ secrets.BQ_TABLE }} \
+            --project       ${{ secrets.GCP_PROJECT }} \
+            --collinfo-path collinfo.json
