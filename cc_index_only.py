@@ -1,25 +1,10 @@
 #!/usr/bin/env python3
-"""
-cc_index_only.py
-
-Harvest YouTube channel homepage URLs via the Common Crawl Index API
-across every snapshot in a given year, streaming *only new* channel URLs into BigQuery.
-Supports reading a pre‑downloaded collinfo.json, normalizes variants (including `/browse/...-UC...`),
-can start at any snapshot, and uses HTTP/2 (via httpx) with increased retries/back‑off.
-"""
-
-import argparse
-import json
-import re
-import sys
-import time
+import argparse, json, re, sys, time
 from urllib.parse import quote, unquote
-
 import httpx
 from tqdm import tqdm
 from google.cloud import bigquery
 
-# ─── Configuration ────────────────────────────────────────────────────────────
 PATTERNS = [
     "*.youtube.com/@*",
     "*.youtube.com/c/*",
@@ -27,136 +12,99 @@ PATTERNS = [
     "*.youtube.com/user/*",
     "*.youtube.com/+*",
 ]
-
 INDEX_URL = "https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+COLLINFO_URL = "http://index.commoncrawl.org/collinfo.json"
+DEFAULT_MAX_PAGES, DEFAULT_BATCH_SIZE = 10000, 500
+ALLOWED_PREFIXES = ("/@", "/c/", "/channel/", "/user/", "/+")
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/115.0.0.0 Safari/537.36"
-)
-
-DEFAULT_MAX_PAGES  = 10000
-DEFAULT_BATCH_SIZE = 500
-COLLINFO_URL       = "http://index.commoncrawl.org/collinfo.json"
-ALLOWED_PREFIXES   = ("/@", "/c/", "/channel/", "/user/", "/+")
-# ───────────────────────────────────────────────────────────────────────────────
-
-# HTTPX client with HTTP/2
 httpx_client = httpx.Client(http2=True, headers={"User-Agent": USER_AGENT}, timeout=120)
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Harvest YouTube channel URLs from CC snapshots in a year"
-    )
-    p.add_argument("--year",           required=True, help="4-digit year (e.g. 2024)")
-    p.add_argument("--start-snapshot", help="Snapshot ID to start at (e.g. CC-MAIN-2024-33)")
-    p.add_argument("--dataset",        required=True, help="BigQuery dataset")
-    p.add_argument("--table",          required=True, help="BigQuery table")
-    p.add_argument("--project",        default=None, help="GCP project ID (overrides ADC)")
-    p.add_argument("--max-pages",      type=int, default=DEFAULT_MAX_PAGES,
-                   help="Max pages per pattern")
-    p.add_argument("--batch-size",     type=int, default=DEFAULT_BATCH_SIZE,
-                   help="Rows per insert")
-    p.add_argument("--collinfo-path",  default=None,
-                   help="Path to a pre-downloaded collinfo.json")
+    p = argparse.ArgumentParser()
+    p.add_argument("--year", required=True)
+    p.add_argument("--start-snapshot")
+    p.add_argument("--pattern")
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--table", required=True)
+    p.add_argument("--project")
+    p.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
+    p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    p.add_argument("--collinfo-path")
     return p.parse_args()
 
-def discover_snapshots(year, collinfo_path=None):
+def discover_snapshots(year, collinfo_path):
     if collinfo_path:
         data = json.load(open(collinfo_path))
     else:
-        resp = httpx_client.get(COLLINFO_URL)
-        resp.raise_for_status()
-        data = resp.json()
+        data = httpx_client.get(COLLINFO_URL).json()
     snaps = sorted(c["id"] for c in data if c["id"].startswith(f"CC-MAIN-{year}-"))
     if not snaps:
-        print(f"❌ No snapshots found for year {year}", file=sys.stderr)
         sys.exit(1)
     return snaps
 
-def normalize_url(raw: str) -> str:
+def normalize_url(raw):
     dec = unquote(raw.strip())
     scheme_re = re.compile(r"^(?:https?://|//)?(?:m\.)?(?:www\.)?", re.IGNORECASE)
     path = scheme_re.sub("", dec).split("?",1)[0].split("#",1)[0].rstrip("/")
-    segments = path.split("/")
-    if len(segments)==2 and segments[1]:
-        return f"https://www.youtube.com/{segments[1]}"
-    if segments[0]=="browse" and "-" in segments[-1]:
-        candidate = segments[-1].split("-",1)[-1]
-        if candidate.startswith("UC"):
-            return f"https://www.youtube.com/channel/{candidate}"
+    seg = path.split("/")
+    if len(seg)==2 and seg[1]:
+        return f"https://www.youtube.com/{seg[1]}"
+    if seg[0]=="browse" and "-" in seg[-1]:
+        c = seg[-1].split("-",1)[-1]
+        if c.startswith("UC"):
+            return f"https://www.youtube.com/channel/{c}"
     return ""
 
 def fetch_index_records(snapshot, pattern, page):
     enc = quote(pattern, safe="/@+")
     url = INDEX_URL.format(snapshot=snapshot, enc=enc, page=page)
-
-    for attempt in range(1, 13):  # 12 retries
+    for attempt in range(1,13):
         try:
             resp = httpx_client.get(url)
-            if resp.status_code == 400:
+            if resp.status_code==400:
                 return []
-            if resp.status_code == 429:
-                wait = min(2 ** attempt, 60)
-                time.sleep(wait)
+            if resp.status_code==429:
+                time.sleep(min(2**attempt,60))
                 continue
             resp.raise_for_status()
             return resp.text.splitlines()
-        except httpx.HTTPError as e:
-            if attempt < 12:
-                wait = min(2 ** attempt, 60)
-                print(f"❗ retry {attempt} for {snapshot} {pattern} page {page}: {e}. sleeping {wait}s",
-                      file=sys.stderr)
-                time.sleep(wait)
+        except httpx.HTTPError:
+            if attempt<12:
+                time.sleep(min(2**attempt,60))
             else:
-                print(f"⚠️ skipping {snapshot} {pattern} page {page} after 12 retries", file=sys.stderr)
                 return []
 
 def save_batch(client, table_ref, urls):
-    errs = client.insert_rows_json(table_ref, [{"url":u} for u in urls])
-    if errs:
-        print("❌ BQ insert errors:", errs, file=sys.stderr)
+    client.insert_rows_json(table_ref, [{"url":u} for u in urls])
 
 def main():
     args = parse_args()
     snaps = discover_snapshots(args.year, args.collinfo_path)
     if args.start_snapshot:
-        try:
-            idx = snaps.index(args.start_snapshot)
-            snaps = snaps[idx:]
-        except ValueError:
-            print(f"❌ start snapshot not found: {args.start_snapshot}", file=sys.stderr)
-            sys.exit(1)
+        idx = snaps.index(args.start_snapshot)
+        snaps = snaps[idx:]
+    patterns = [args.pattern] if args.pattern else PATTERNS
 
-    print(f"✅ Processing {len(snaps)} snapshots starting at {snaps[0]}")
     client = bigquery.Client(project=args.project) if args.project else bigquery.Client()
     table_ref = client.dataset(args.dataset).table(args.table)
-    full_table = f"{client.project}.{args.dataset}.{args.table}"
-
-    seen = {r.url for r in client.query(f"SELECT url FROM `{full_table}`").result()}
-    print(f"✅ Preloaded {len(seen)} existing URLs")
+    seen = {r.url for r in client.query(f"SELECT url FROM `{client.project}.{args.dataset}.{args.table}`").result()}
 
     total_new = 0
+
     for snap in snaps:
-        print(f"\n===== Snapshot: {snap} =====")
-        for pattern in PATTERNS:
-            print(f"--- Pattern: {pattern} ---")
+        print(f"\n\n===== Snapshot: {snap} =====")
+        for pattern in patterns:
+            print(f"\n--- Pattern: {pattern} ---")
             for page in tqdm(range(args.max_pages), desc="pages", unit="page"):
                 lines = fetch_index_records(snap, pattern, page)
                 if not lines:
                     break
                 batch = []
                 for line in lines:
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                    rec = json.loads(line)
                     clean = normalize_url(rec.get("url",""))
-                    if not clean:
-                        continue
-                    suffix = clean.replace("https://www.youtube.com","")
-                    if suffix.startswith(ALLOWED_PREFIXES) and clean not in seen:
+                    if clean and clean.replace("https://www.youtube.com","").startswith(ALLOWED_PREFIXES) and clean not in seen:
                         seen.add(clean)
                         batch.append(clean)
                         total_new += 1
