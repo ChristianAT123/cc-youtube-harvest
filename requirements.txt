@@ -1,4 +1,4 @@
 requests
 tqdm
 google-cloud-bigquery
-httpx>=0.28.1
+httpx[http2]>=0.28.1
