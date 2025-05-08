@@ -31,11 +31,11 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
 
-      - name: Resume backfill from CC-MAIN-2024-26
+      - name: Resume backfill from CC-MAIN-2024-33
         run: |
           python cc_index_only.py \
             --year            2024 \
-            --start-snapshot  CC-MAIN-2024-26 \
+            --start-snapshot  CC-MAIN-2024-33 \
             --dataset         ${{ secrets.BQ_DATASET }} \
             --table           ${{ secrets.BQ_TABLE }} \
             --project         ${{ secrets.GCP_PROJECT }} \
