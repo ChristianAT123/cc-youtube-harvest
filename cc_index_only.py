@@ -107,7 +107,7 @@ def fetch_index_records(snapshot, pattern, page, retries=5):
     Fetch one page of Index API JSON lines, retrying on 429 or network errors.
     Return list of lines or [] if exhausted.
     """
-    enc = quote(pattern, safe="*/@+:")
+    enc = quote(pattern, safe="*/@+")
     url = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
     headers = {"User-Agent": USER_AGENT}
     backoff = 1
