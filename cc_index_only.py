@@ -33,6 +33,7 @@ DEFAULT_MAX_PAGES  = 10000
 DEFAULT_BATCH_SIZE = 500
 COLLINFO_URL       = "http://index.commoncrawl.org/collinfo.json"
 
+# Only allow these path prefixes after normalization
 ALLOWED_PREFIXES = ("/@", "/c/", "/channel/", "/user/", "/+")
 # ───────────────────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,10 @@ def parse_args():
         description="Harvest YouTube channel URLs from CC snapshots in a year"
     )
     p.add_argument("--year",            required=True, help="4-digit year to scan (e.g. 2024)")
-    p.add_argument("--start-snapshot",  help="Snapshot ID to start at (e.g. CC-MAIN-2024-18)")
+    p.add_argument(
+        "--start-snapshot",
+        help="Snapshot ID to start at (e.g. CC-MAIN-2024-22)"
+    )
     p.add_argument("--dataset",         required=True, help="BigQuery dataset")
     p.add_argument("--table",           required=True, help="BigQuery table")
     p.add_argument("--project",         default=None, help="GCP project ID (overrides ADC)")
@@ -72,21 +76,25 @@ def normalize_url(raw: str) -> str:
     path = scheme_re.sub("", dec).split("?",1)[0].split("#",1)[0].rstrip("/")
     segments = path.split("/")
 
-    # prefix/id
+    # Case A: simple prefix/id
     if len(segments)==2 and segments[1]:
         return f"https://www.youtube.com/{segments[1]}"
-    # browse/...-UC...
+
+    # Case B: browse/...-UC...
     if segments[0]=="browse" and "-" in segments[-1]:
         candidate = segments[-1].split("-",1)[-1]
         if candidate.startswith("UC"):
             return f"https://www.youtube.com/channel/{candidate}"
+
     return ""
 
 def fetch_index_records(snapshot, pattern, page, retries=5):
-    enc   = quote(pattern, safe="*/@+.")
-    url   = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
+    # encode '*' as %2A so CC accepts it reliably
+    enc = quote(pattern, safe="/@+.")
+    url = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
     headers = {"User-Agent": USER_AGENT}
     backoff = 1
+
     for attempt in range(1, retries+1):
         try:
             resp = requests.get(url, headers=headers, timeout=120)
@@ -118,8 +126,8 @@ def main():
     snaps = discover_snapshots(args.year, args.collinfo_path)
     if args.start_snapshot:
         try:
-            idx = snaps.index(args.start_snapshot)
-            snaps = snaps[idx:]
+            i = snaps.index(args.start_snapshot)
+            snaps = snaps[i:]
         except ValueError:
             print(f"❌ start snapshot {args.start_snapshot} not found", file=sys.stderr)
             sys.exit(1)
@@ -143,11 +151,11 @@ def main():
                     break
                 batch=[]
                 for line in lines:
-                    try: rec=json.loads(line)
+                    try: rec = json.loads(line)
                     except: continue
-                    clean=normalize_url(rec.get("url",""))
+                    clean = normalize_url(rec.get("url",""))
                     if not clean: continue
-                    suffix=clean.replace("https://www.youtube.com","")
+                    suffix = clean.replace("https://www.youtube.com","")
                     if suffix.startswith(ALLOWED_PREFIXES) and clean not in seen:
                         seen.add(clean); batch.append(clean); total_new+=1
                     if len(batch)>=args.batch_size:
