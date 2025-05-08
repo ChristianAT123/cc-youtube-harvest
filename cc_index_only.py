@@ -2,18 +2,19 @@
 """
 cc_index_only.py
 
-Harvest all YouTube channel homepage URLs that Common Crawl has fetched,
-using the Index-Only method with automatic 429 back-off, and stream them
-into a BigQuery table.
+Harvest all YouTube channel homepage URLs via the Common Crawl Index API
+(“Index-Only” method) with robust retries and URL-encoding.
+Streams unique URLs directly into BigQuery.
 """
 
-import os
-import sys
+import argparse
 import json
 import re
 import time
-import argparse
+from urllib.parse import quote_plus
+
 import requests
+from requests.exceptions import RequestException
 from tqdm import tqdm
 from google.cloud import bigquery
 
@@ -39,31 +40,54 @@ def normalize_url(raw_url: str) -> str:
     path = scheme_re.sub("", raw_url)
     path = path.split("?",1)[0].split("#",1)[0].rstrip("/")
     parts = path.split("/",1)
-    if len(parts)!=2: return ""
+    if len(parts)!=2: 
+        return ""
     return "https://www.youtube.com/" + parts[1]
 
 def fetch_index_records(snapshot, pattern, page, max_retries=5):
-    url = (f"https://index.commoncrawl.org/{snapshot}-index"
-           f"?url={pattern}&output=json&page={page}")
+    """
+    Fetch one page of results for 'pattern' from the CC Index API,
+    retrying on network errors or 429s. Returns a list of JSON lines.
+    """
+    # URL-encode the pattern
+    enc = quote_plus(pattern)
+    url = (
+        f"https://index.commoncrawl.org/{snapshot}-index"
+        f"?url={enc}&output=json&page={page}"
+    )
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; IndexFetcher/1.0)"}
+
+    backoff = 1
     for attempt in range(max_retries):
-        resp = requests.get(url, timeout=60)
-        if resp.status_code == 429:
-            wait = int(resp.headers.get("Retry-After", 60))
-            time.sleep(wait)
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+        except RequestException as e:
+            time.sleep(backoff)
+            backoff *= 2
             continue
+
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", backoff))
+            time.sleep(wait)
+            backoff *= 2
+            continue
+
         resp.raise_for_status()
         return resp.text.splitlines()
-    raise RuntimeError(f"Rate limit at page {page}")
+
+    raise RuntimeError(f"Failed to fetch page {page} for {pattern} after {max_retries} attempts")
 
 def save_batch_to_bq(client, table_ref, rows):
-    errors = client.insert_rows_json(table_ref, [{"url":u} for u in rows])
+    errors = client.insert_rows_json(table_ref, [{"url": u} for u in rows])
     if errors:
-        print("BigQuery insert errors:", errors, file=sys.stderr)
+        print("BigQuery insert errors:", errors)
 
 def main():
     args = parse_args()
+    # initialize BigQuery client
     bq_client = bigquery.Client(project=args.project) if args.project else bigquery.Client()
     table_ref = bq_client.dataset(args.dataset).table(args.table)
+
     seen = set()
     total_new = 0
 
@@ -73,7 +97,7 @@ def main():
             try:
                 lines = fetch_index_records(args.snapshot, pattern, page)
             except Exception as e:
-                print(f"Stopping {pattern} at page {page}: {e}", file=sys.stderr)
+                print(f"Stopping {pattern} at page {page}: {e}")
                 break
             if not lines:
                 break
