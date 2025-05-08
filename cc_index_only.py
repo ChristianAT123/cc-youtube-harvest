@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-cc_index_only.py
+cc_index_only.py (updated)
 
 Harvest YouTube channel homepage URLs via the Common Crawl Index API
-across every snapshot in a given year, streaming *only new* URLs into BigQuery.
-Supports reading a pre‑downloaded collinfo.json to avoid remote fetch failures,
-and skips any non‑JSON lines in index responses.
+across every snapshot in a given year, streaming *only new* channel URLs into BigQuery.
+Supports reading a pre-downloaded collinfo.json to avoid remote fetch failures,
+and normalizes all variants (including `/browse/...-UC...`) to standard channel homepages.
 """
 
 import argparse
@@ -22,16 +22,19 @@ from google.cloud import bigquery
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 PATTERNS = [
-    "*.youtube.com/@*",
-    "*.youtube.com/c/*",
-    "*.youtube.com/channel/*",
-    "*.youtube.com/user/*",
-    "*.youtube.com/+*",
+    "https://www.youtube.com/@*",
+    "https://www.youtube.com/c/*",
+    "https://www.youtube.com/channel/*",
+    "https://www.youtube.com/user/*",
+    "https://www.youtube.com/+*",
 ]
 USER_AGENT         = "Mozilla/5.0 (compatible; IndexFetcher/1.0)"
 DEFAULT_MAX_PAGES  = 10000
 DEFAULT_BATCH_SIZE = 500
 COLLINFO_URL       = "http://index.commoncrawl.org/collinfo.json"
+
+# Only allow these path prefixes after normalization
+ALLOWED_PREFIXES = ("/@", "/c/", "/channel/", "/user/", "/+")
 # ───────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -49,6 +52,7 @@ def parse_args():
     p.add_argument("--collinfo-path", default=None,
                    help="Path to a pre-downloaded collinfo.json")
     return p.parse_args()
+
 
 def discover_snapshots(year, collinfo_path=None):
     """
@@ -72,17 +76,38 @@ def discover_snapshots(year, collinfo_path=None):
         sys.exit(1)
     return snaps
 
+
 def normalize_url(raw: str) -> str:
+    """
+    Normalize various YouTube URL forms into a standard channel homepage URL,
+    or return empty string for non-channel URLs.
+    """
     dec = unquote(raw.strip())
     scheme_re = re.compile(r"^(?:https?://|//)?(?:m\.)?(?:www\.)?", re.IGNORECASE)
     path = scheme_re.sub("", dec).split("?", 1)[0].split("#", 1)[0].rstrip("/")
-    parts = path.split("/", 1)
-    if len(parts) != 2 or not parts[1]:
-        return ""
-    return f"https://www.youtube.com/{parts[1]}"
+    segments = path.split("/")
+
+    # Case A: simple two-part path: '<prefix>/<id>'
+    if len(segments) == 2 and segments[1]:
+        return f"https://www.youtube.com/{segments[1]}"
+
+    # Case B: browse URL ending in dash+UC ID
+    # e.g. 'browse/...-UCxxxxx'
+    if segments[0] == "browse" and "-" in segments[-1]:
+        candidate = segments[-1].split("-", 1)[-1]
+        if candidate.startswith("UC"):
+            return f"https://www.youtube.com/channel/{candidate}"
+
+    # Otherwise drop it
+    return ""
+
 
 def fetch_index_records(snapshot, pattern, page, retries=5):
-    enc = quote(pattern, safe="*/@+")
+    """
+    Fetch one page of Index API JSON lines, retrying on 429 or network errors.
+    Return list of lines or [] if exhausted.
+    """
+    enc = quote(pattern, safe="*/@+:")
     url = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
     headers = {"User-Agent": USER_AGENT}
     backoff = 1
@@ -90,6 +115,9 @@ def fetch_index_records(snapshot, pattern, page, retries=5):
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, headers=headers, timeout=60)
+            # treat Bad Request as end-of-pages
+            if resp.status_code == 400:
+                return []
             if resp.status_code == 429:
                 wait = int(resp.headers.get("Retry-After", backoff))
                 time.sleep(wait)
@@ -106,11 +134,13 @@ def fetch_index_records(snapshot, pattern, page, retries=5):
                 print(f"⛔ giving up on {snapshot} {pattern} page {page} after {retries} retries", file=sys.stderr)
                 return []
 
+
 def save_batch(client, table_ref, urls):
     rows = [{"url": u} for u in urls]
     errs = client.insert_rows_json(table_ref, rows)
     if errs:
         print("❌ BQ insert errors:", errs, file=sys.stderr)
+
 
 def main():
     args = parse_args()
@@ -143,11 +173,13 @@ def main():
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
-                        # skip any non‑JSON (e.g. HTML error pages)
                         continue
 
                     clean = normalize_url(rec.get("url", ""))
-                    if clean and clean not in seen:
+                    if not clean:
+                        continue
+                    suffix = clean.replace("https://www.youtube.com", "")
+                    if suffix.startswith(ALLOWED_PREFIXES) and clean not in seen:
                         seen.add(clean)
                         batch.append(clean)
                         total_new += 1
