@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-cc_index_only.py (updated)
+cc_index_only.py
 
 Harvest YouTube channel homepage URLs via the Common Crawl Index API
 across every snapshot in a given year, streaming *only new* channel URLs into BigQuery.
-Supports reading a pre-downloaded collinfo.json to avoid remote fetch failures,
+Supports reading a pre‑downloaded collinfo.json to avoid remote fetch failures,
 and normalizes all variants (including `/browse/...-UC...`) to standard channel homepages.
 """
 
@@ -22,11 +22,11 @@ from google.cloud import bigquery
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 PATTERNS = [
-    "https://www.youtube.com/@*",
-    "https://www.youtube.com/c/*",
-    "https://www.youtube.com/channel/*",
-    "https://www.youtube.com/user/*",
-    "https://www.youtube.com/+*",
+    "www.youtube.com/@*",
+    "www.youtube.com/c/*",
+    "www.youtube.com/channel/*",
+    "www.youtube.com/user/*",
+    "www.youtube.com/+*",
 ]
 USER_AGENT         = "Mozilla/5.0 (compatible; IndexFetcher/1.0)"
 DEFAULT_MAX_PAGES  = 10000
@@ -53,12 +53,7 @@ def parse_args():
                    help="Path to a pre-downloaded collinfo.json")
     return p.parse_args()
 
-
 def discover_snapshots(year, collinfo_path=None):
-    """
-    Read snapshots from collinfo_path if provided, else fetch remotely.
-    Return sorted list of CC-MAIN-<year>-XX IDs.
-    """
     if collinfo_path:
         with open(collinfo_path, "r") as f:
             data = json.load(f)
@@ -66,22 +61,13 @@ def discover_snapshots(year, collinfo_path=None):
         resp = requests.get(COLLINFO_URL, headers={"User-Agent": USER_AGENT}, timeout=60)
         resp.raise_for_status()
         data = resp.json()
-
-    snaps = sorted(
-        c["id"] for c in data
-        if c["id"].startswith(f"CC-MAIN-{year}-")
-    )
+    snaps = sorted(c["id"] for c in data if c["id"].startswith(f"CC-MAIN-{year}-"))
     if not snaps:
         print(f"❌ No snapshots found for year {year}", file=sys.stderr)
         sys.exit(1)
     return snaps
 
-
 def normalize_url(raw: str) -> str:
-    """
-    Normalize various YouTube URL forms into a standard channel homepage URL,
-    or return empty string for non-channel URLs.
-    """
     dec = unquote(raw.strip())
     scheme_re = re.compile(r"^(?:https?://|//)?(?:m\.)?(?:www\.)?", re.IGNORECASE)
     path = scheme_re.sub("", dec).split("?", 1)[0].split("#", 1)[0].rstrip("/")
@@ -92,21 +78,14 @@ def normalize_url(raw: str) -> str:
         return f"https://www.youtube.com/{segments[1]}"
 
     # Case B: browse URL ending in dash+UC ID
-    # e.g. 'browse/...-UCxxxxx'
     if segments[0] == "browse" and "-" in segments[-1]:
         candidate = segments[-1].split("-", 1)[-1]
         if candidate.startswith("UC"):
             return f"https://www.youtube.com/channel/{candidate}"
 
-    # Otherwise drop it
     return ""
 
-
 def fetch_index_records(snapshot, pattern, page, retries=5):
-    """
-    Fetch one page of Index API JSON lines, retrying on 429 or network errors.
-    Return list of lines or [] if exhausted.
-    """
     enc = quote(pattern, safe="*/@+")
     url = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
     headers = {"User-Agent": USER_AGENT}
@@ -115,7 +94,6 @@ def fetch_index_records(snapshot, pattern, page, retries=5):
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, headers=headers, timeout=60)
-            # treat Bad Request as end-of-pages
             if resp.status_code == 400:
                 return []
             if resp.status_code == 429:
@@ -134,17 +112,14 @@ def fetch_index_records(snapshot, pattern, page, retries=5):
                 print(f"⛔ giving up on {snapshot} {pattern} page {page} after {retries} retries", file=sys.stderr)
                 return []
 
-
 def save_batch(client, table_ref, urls):
     rows = [{"url": u} for u in urls]
     errs = client.insert_rows_json(table_ref, rows)
     if errs:
         print("❌ BQ insert errors:", errs, file=sys.stderr)
 
-
 def main():
     args = parse_args()
-
     snaps = discover_snapshots(args.year, args.collinfo_path)
     print(f"✅ Found {len(snaps)} snapshots for year {args.year}")
 
@@ -158,7 +133,6 @@ def main():
     print(f"✅ Preloaded {len(seen)} existing URLs")
 
     total_new = 0
-
     for snap in snaps:
         print(f"\n\n===== Snapshot: {snap} =====")
         for pattern in PATTERNS:
@@ -167,14 +141,12 @@ def main():
                 lines = fetch_index_records(snap, pattern, page)
                 if not lines:
                     break
-
                 batch = []
                 for line in lines:
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-
                     clean = normalize_url(rec.get("url", ""))
                     if not clean:
                         continue
@@ -183,11 +155,9 @@ def main():
                         seen.add(clean)
                         batch.append(clean)
                         total_new += 1
-
                     if len(batch) >= args.batch_size:
                         save_batch(client, table_ref, batch)
                         batch.clear()
-
                 if batch:
                     save_batch(client, table_ref, batch)
 
