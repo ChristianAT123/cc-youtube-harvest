@@ -21,9 +21,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download Common Crawl snapshot list
+      - name: Download Common Crawl snapshot list (with retries)
         run: |
-          curl -sS https://index.commoncrawl.org/collinfo.json -o collinfo.json
+          for i in 1 2 3 4 5; do
+            curl -sS https://index.commoncrawl.org/collinfo.json -o collinfo.json && break
+            echo "❗ curl attempt $i failed, retrying in $((i*5))s..."
+            sleep $((i*5))
+          done
+          test -s collinfo.json
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v1
