@@ -4,7 +4,8 @@ cc_index_only.py
 
 Harvest YouTube channel homepage URLs via the Common Crawl Index API
 across every snapshot in a given year, streaming *only new* URLs into BigQuery.
-Supports reading a pre‑downloaded collinfo.json to avoid remote fetch failures.
+Supports reading a pre‑downloaded collinfo.json to avoid remote fetch failures,
+and skips any non‑JSON lines in index responses.
 """
 
 import argparse
@@ -102,7 +103,8 @@ def fetch_index_records(snapshot, pattern, page, retries=5):
                 time.sleep(backoff)
                 backoff *= 2
             else:
-                raise RuntimeError(f"Failed fetch page={page} pattern={pattern} snapshot={snapshot}: {e}")
+                print(f"⛔ giving up on {snapshot} {pattern} page {page} after {retries} retries", file=sys.stderr)
+                return []
 
 def save_batch(client, table_ref, urls):
     rows = [{"url": u} for u in urls]
@@ -132,22 +134,24 @@ def main():
         for pattern in PATTERNS:
             print(f"\n--- Pattern: {pattern} ---")
             for page in tqdm(range(args.max_pages), desc="pages", unit="page"):
-                try:
-                    lines = fetch_index_records(snap, pattern, page)
-                except Exception as e:
-                    print(f"⛔ Stopping {pattern}@{snap} page {page}: {e}", file=sys.stderr)
-                    break
+                lines = fetch_index_records(snap, pattern, page)
                 if not lines:
                     break
 
                 batch = []
                 for line in lines:
-                    rec = json.loads(line)
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        # skip any non‑JSON (e.g. HTML error pages)
+                        continue
+
                     clean = normalize_url(rec.get("url", ""))
                     if clean and clean not in seen:
                         seen.add(clean)
                         batch.append(clean)
                         total_new += 1
+
                     if len(batch) >= args.batch_size:
                         save_batch(client, table_ref, batch)
                         batch.clear()
