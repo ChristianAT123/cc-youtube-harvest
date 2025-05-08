@@ -1,10 +1,10 @@
-name: Monthly YouTube Channel Harvest
+name: YouTube Channel Backfill Harvest
 
 on:
   workflow_dispatch:
 
 jobs:
-  harvest:
+  backfill:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,9 +21,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Provide static snapshot list
-        run: echo "Using checked‑in collinfo.json"
-
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v1
         with:
@@ -34,11 +31,11 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
 
-      - name: Run harvest script
+      - name: Run backfill from CC-MAIN-2024-22
         run: |
           python cc_index_only.py \
             --year            2024 \
-            --start-snapshot  CC-MAIN-2024-18 \
+            --start-snapshot  CC-MAIN-2024-22 \
             --dataset         ${{ secrets.BQ_DATASET }} \
             --table           ${{ secrets.BQ_TABLE }} \
             --project         ${{ secrets.GCP_PROJECT }} \
