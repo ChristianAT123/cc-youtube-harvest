@@ -26,9 +26,9 @@ PATTERNS = [
     "*.youtube.com/user/*",
     "*.youtube.com/+*",
 ]
-USER_AGENT       = "Mozilla/5.0 (compatible; IndexFetcher/1.0)"
-DEFAULT_MAX_PAGES  = 10000
-DEFAULT_BATCH_SIZE = 500
+USER_AGENT        = "Mozilla/5.0 (compatible; IndexFetcher/1.0)"
+DEFAULT_MAX_PAGES = 10000
+DEFAULT_BATCH_SIZE= 500
 COLLINFO_URL      = "https://index.commoncrawl.org/collinfo.json"
 # ───────────────────────────────────────────────────────────────────────────────
 
@@ -48,9 +48,21 @@ def parse_args():
     return p.parse_args()
 
 def discover_snapshots(year):
-    r = requests.get(COLLINFO_URL, timeout=30)
-    r.raise_for_status()
-    return sorted(c["id"] for c in r.json() if c["id"].startswith(f"CC-MAIN-{year}-"))
+    backoff = 1
+    for _ in range(5):
+        try:
+            r = requests.get(COLLINFO_URL, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            return sorted(
+                c["id"] for c in data
+                if c["id"].startswith(f"CC-MAIN-{year}-")
+            )
+        except (RequestException, ValueError):
+            time.sleep(backoff)
+            backoff *= 2
+    print(f"❌ Failed to fetch snapshot list after retries", file=sys.stderr)
+    sys.exit(1)
 
 def normalize_url(raw: str) -> str:
     dec = unquote(raw.strip())
@@ -82,27 +94,24 @@ def save_batch(client, table_ref, urls):
     rows=[{"url":u} for u in urls]
     errs=client.insert_rows_json(table_ref, rows)
     if errs:
-        print("BQ insert errors:", errs, file=sys.stderr)
+        print("❌ BQ insert errors:", errs, file=sys.stderr)
 
 def main():
     args = parse_args()
-    # discover snapshots
     snaps = discover_snapshots(args.year)
     if not snaps:
-        print(f"No snapshots for year {args.year}", file=sys.stderr)
+        print(f"❌ No snapshots for year {args.year}", file=sys.stderr)
         sys.exit(1)
 
-    # init BigQuery client
     client = bigquery.Client(project=args.project) if args.project else bigquery.Client()
     table_ref = client.dataset(args.dataset).table(args.table)
 
-    # preload existing URLs
+    # Preload existing URLs
     print("Loading existing URLs from BigQuery…")
-    project = client.project
-    full_table = f"{project}.{args.dataset}.{args.table}"
+    full_table = f"{client.project}.{args.dataset}.{args.table}"
     existing = client.query(f"SELECT url FROM `{full_table}`").result()
     seen = {row.url for row in existing}
-    print(f"Preloaded {len(seen)} URLs")
+    print(f"✅ Preloaded {len(seen)} URLs")
 
     total_new = 0
 
@@ -114,20 +123,20 @@ def main():
                 try:
                     lines = fetch_index_records(snap, pattern, page)
                 except Exception as e:
-                    print(f"Stop {pattern}@{snap} page {page}: {e}", file=sys.stderr)
+                    print(f"Stopping {pattern}@{snap} page {page}: {e}", file=sys.stderr)
                     break
                 if not lines:
                     break
 
-                batch=[]
+                batch = []
                 for line in lines:
-                    rec=json.loads(line)
-                    clean=normalize_url(rec.get("url",""))
+                    rec = json.loads(line)
+                    clean = normalize_url(rec.get("url",""))
                     if clean and clean not in seen:
                         seen.add(clean)
                         batch.append(clean)
-                        total_new+=1
-                    if len(batch)>=args.batch_size:
+                        total_new += 1
+                    if len(batch) >= args.batch_size:
                         save_batch(client, table_ref, batch)
                         batch.clear()
 
