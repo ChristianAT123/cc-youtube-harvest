@@ -5,7 +5,7 @@ cc_index_only.py
 Harvest YouTube channel homepage URLs via the Common Crawl Index API
 across every snapshot in a given year, streaming *only new* channel URLs into BigQuery.
 Supports reading a pre‑downloaded collinfo.json, normalizes variants (including `/browse/...-UC...`),
-can start at any snapshot, and uses HTTP/2 (via httpx) for more reliable fetches.
+can start at any snapshot, and uses HTTP/2 (via httpx) with increased retries/back‑off.
 """
 
 import argparse
@@ -42,7 +42,7 @@ COLLINFO_URL       = "http://index.commoncrawl.org/collinfo.json"
 ALLOWED_PREFIXES   = ("/@", "/c/", "/channel/", "/user/", "/+")
 # ───────────────────────────────────────────────────────────────────────────────
 
-# Create one HTTPX client with HTTP/2 enabled
+# HTTPX client with HTTP/2
 httpx_client = httpx.Client(http2=True, headers={"User-Agent": USER_AGENT}, timeout=120)
 
 def parse_args():
@@ -88,25 +88,29 @@ def normalize_url(raw: str) -> str:
             return f"https://www.youtube.com/channel/{candidate}"
     return ""
 
-def fetch_index_records(snapshot, pattern, page, retries=8):
+def fetch_index_records(snapshot, pattern, page):
     enc = quote(pattern, safe="/@+")
     url = INDEX_URL.format(snapshot=snapshot, enc=enc, page=page)
-    for attempt in range(1, retries+1):
+
+    for attempt in range(1, 13):  # 12 retries
         try:
             resp = httpx_client.get(url)
             if resp.status_code == 400:
                 return []
             if resp.status_code == 429:
-                time.sleep(2 ** attempt)
+                wait = min(2 ** attempt, 60)
+                time.sleep(wait)
                 continue
             resp.raise_for_status()
             return resp.text.splitlines()
         except httpx.HTTPError as e:
-            if attempt < retries:
-                print(f"❗ retry {attempt} for {snapshot} {pattern} page {page}: {e}", file=sys.stderr)
-                time.sleep(2 ** attempt)
+            if attempt < 12:
+                wait = min(2 ** attempt, 60)
+                print(f"❗ retry {attempt} for {snapshot} {pattern} page {page}: {e}. sleeping {wait}s",
+                      file=sys.stderr)
+                time.sleep(wait)
             else:
-                print(f"⚠️ skipping {snapshot} {pattern} page {page} after {retries} retries", file=sys.stderr)
+                print(f"⚠️ skipping {snapshot} {pattern} page {page} after 12 retries", file=sys.stderr)
                 return []
 
 def save_batch(client, table_ref, urls):
