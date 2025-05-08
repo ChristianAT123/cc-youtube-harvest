@@ -7,7 +7,7 @@ across every snapshot in a given year, streaming *only new* channel URLs into Bi
 Supports:
   - reading a pre‑downloaded collinfo.json to avoid remote fetch failures
   - percent‑encoding wildcard patterns for reliability
-  - HTTP/2 requests via httpx with backoff & retry (but falls back to HTTP/1.1 for pages 0–2)
+  - HTTP/2 requests via httpx with backoff & retry
   - a --start-snapshot flag to resume mid‑year
   - normalization of “/browse/...-UC...” URLs into /channel/UC...
   - deduplication against an existing BigQuery table
@@ -32,15 +32,16 @@ PATTERNS = [
     "*.youtube.com/user/*",
     "*.youtube.com/+*",
 ]
-INDEX_URL         = "https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
-COLLINFO_URL      = "http://index.commoncrawl.org/collinfo.json"
-USER_AGENT        = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                     "Chrome/115.0.0.0 Safari/537.36")
+INDEX_URL        = "https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
+COLLINFO_URL     = "http://index.commoncrawl.org/collinfo.json"
+USER_AGENT       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " \
+                   "AppleWebKit/537.36 (KHTML, like Gecko) " \
+                   "Chrome/115.0.0.0 Safari/537.36"
 DEFAULT_MAX_PAGES = 10000
 DEFAULT_BATCH_SIZE = 500
-ALLOWED_PREFIXES  = ("/@", "/c/", "/channel/", "/user/", "/+")
+ALLOWED_PREFIXES = ("/@", "/c/", "/channel/", "/user/", "/+")
 
+# httpx client with HTTP/2 support and 120s timeout
 httpx_client = httpx.Client(
     http2=True,
     headers={"User-Agent": USER_AGENT},
@@ -52,15 +53,24 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Harvest YouTube channel URLs from Common Crawl indices"
     )
-    p.add_argument("--year",            required=True, help="4‑digit year to scan (e.g. 2024)")
-    p.add_argument("--start-snapshot",  default=None, help="ID of CC-MAIN snapshot to resume at")
-    p.add_argument("--pattern",         default=None, help="(Optional) single glob pattern override")
-    p.add_argument("--dataset",         required=True, help="BigQuery dataset to write into")
-    p.add_argument("--table",           required=True, help="BigQuery table to write into")
-    p.add_argument("--project",         default=None, help="GCP project ID (overrides ADC)")
-    p.add_argument("--max-pages",       type=int, default=DEFAULT_MAX_PAGES, help="Max pages per pattern")
-    p.add_argument("--batch-size",      type=int, default=DEFAULT_BATCH_SIZE, help="Rows per BigQuery insert")
-    p.add_argument("--collinfo-path",   default=None, help="Path to pre‑downloaded collinfo.json")
+    p.add_argument("--year",            required=True,
+                   help="4‑digit year to scan (e.g. 2024)")
+    p.add_argument("--start-snapshot",  default=None,
+                   help="ID of CC-MAIN snapshot to resume at")
+    p.add_argument("--pattern",        default=None,
+                   help="(Optional) single glob pattern override")
+    p.add_argument("--dataset",         required=True,
+                   help="BigQuery dataset to write into")
+    p.add_argument("--table",           required=True,
+                   help="BigQuery table to write into")
+    p.add_argument("--project",         default=None,
+                   help="GCP project ID (overrides ADC)")
+    p.add_argument("--max-pages",       type=int, default=DEFAULT_MAX_PAGES,
+                   help="Max pages per pattern")
+    p.add_argument("--batch-size",      type=int, default=DEFAULT_BATCH_SIZE,
+                   help="Rows per BigQuery insert")
+    p.add_argument("--collinfo-path",   default=None,
+                   help="Path to pre‑downloaded collinfo.json")
     return p.parse_args()
 
 
@@ -73,7 +83,10 @@ def discover_snapshots(year, collinfo_path=None):
         resp.raise_for_status()
         data = resp.json()
 
-    snaps = sorted(c["id"] for c in data if c["id"].startswith(f"CC-MAIN-{year}-"))
+    snaps = sorted(
+        c["id"] for c in data
+        if c["id"].startswith(f"CC-MAIN-{year}-")
+    )
     if not snaps:
         print(f"❌ No snapshots found for year {year}", file=sys.stderr)
         sys.exit(1)
@@ -101,15 +114,9 @@ def fetch_index_records(snapshot: str, pattern: str, page: int):
     enc = quote(pattern, safe="/@+")
     url = INDEX_URL.format(snapshot=snapshot, enc=enc, page=page)
 
-    # force HTTP/1.1 for the first three pages
-    if page < 3:
-        client = httpx.Client(http2=False, headers=httpx_client.headers, timeout=httpx_client.timeout)
-    else:
-        client = httpx_client
-
     for attempt in range(1, 12):
         try:
-            resp = client.get(url)
+            resp = httpx_client.get(url)
             if resp.status_code == 400:
                 return []
             if resp.status_code in (429, 503, 504):
@@ -136,8 +143,8 @@ def main():
 
     snaps = discover_snapshots(args.year, args.collinfo_path)
     if args.start_snapshot:
-        idx = snaps.index(args.start_snapshot)
-        snaps = snaps[idx:]
+        i = snaps.index(args.start_snapshot)
+        snaps = snaps[i:]
 
     patterns = [args.pattern] if args.pattern else PATTERNS
 
