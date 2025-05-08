@@ -42,7 +42,10 @@ def parse_args():
         description="Harvest YouTube channel URLs from CC snapshots in a year"
     )
     p.add_argument("--year",            required=True, help="4-digit year to scan (e.g. 2024)")
-    p.add_argument("--start-snapshot",  help="Snapshot ID to start at (e.g. CC-MAIN-2024-26)")
+    p.add_argument(
+        "--start-snapshot",
+        help="Snapshot ID to start at (e.g. CC-MAIN-2024-22)"
+    )
     p.add_argument("--dataset",         required=True, help="BigQuery dataset")
     p.add_argument("--table",           required=True, help="BigQuery table")
     p.add_argument("--project",         default=None, help="GCP project ID (overrides ADC)")
@@ -73,17 +76,21 @@ def normalize_url(raw: str) -> str:
     path = scheme_re.sub("", dec).split("?",1)[0].split("#",1)[0].rstrip("/")
     segments = path.split("/")
 
+    # Case A: simple prefix/id
     if len(segments)==2 and segments[1]:
         return f"https://www.youtube.com/{segments[1]}"
+
+    # Case B: browse/...-UC...
     if segments[0]=="browse" and "-" in segments[-1]:
         candidate = segments[-1].split("-",1)[-1]
         if candidate.startswith("UC"):
             return f"https://www.youtube.com/channel/{candidate}"
+
     return ""
 
 def fetch_index_records(snapshot, pattern, page, retries=5):
-    # Only allow '/', '@', '+' unencoded—percent-encode '*' and '.'
-    enc = quote(pattern, safe="/@+")
+    # encode '*' as %2A so CC accepts it reliably
+    enc = quote(pattern, safe="/@+.")
     url = f"https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
     headers = {"User-Agent": USER_AGENT}
     backoff = 1
@@ -144,23 +151,16 @@ def main():
                     break
                 batch=[]
                 for line in lines:
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                    try: rec = json.loads(line)
+                    except: continue
                     clean = normalize_url(rec.get("url",""))
-                    if not clean:
-                        continue
+                    if not clean: continue
                     suffix = clean.replace("https://www.youtube.com","")
                     if suffix.startswith(ALLOWED_PREFIXES) and clean not in seen:
-                        seen.add(clean)
-                        batch.append(clean)
-                        total_new += 1
-                    if len(batch) >= args.batch_size:
-                        save_batch(client, table_ref, batch)
-                        batch.clear()
-                if batch:
-                    save_batch(client, table_ref, batch)
+                        seen.add(clean); batch.append(clean); total_new+=1
+                    if len(batch)>=args.batch_size:
+                        save_batch(client, table_ref, batch); batch.clear()
+                if batch: save_batch(client, table_ref, batch)
 
     print(f"\n🎉 Done. New unique URLs inserted: {total_new}")
 
