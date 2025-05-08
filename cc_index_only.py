@@ -5,7 +5,7 @@ cc_index_only.py
 Harvest YouTube channel homepage URLs via the Common Crawl Index API
 across every snapshot in a given year, streaming *only new* channel URLs into BigQuery.
 Supports reading a pre‑downloaded collinfo.json, normalizes variants (including `/browse/...-UC...`),
-can start at any snapshot, and falls back across multiple CC index hosts on failure.
+can start at any snapshot, and uses HTTP/2 (via httpx) for more reliable fetches.
 """
 
 import argparse
@@ -15,8 +15,7 @@ import sys
 import time
 from urllib.parse import quote, unquote
 
-import requests
-from requests.exceptions import RequestException
+import httpx
 from tqdm import tqdm
 from google.cloud import bigquery
 
@@ -29,12 +28,7 @@ PATTERNS = [
     "*.youtube.com/+*",
 ]
 
-# Rotate among these if one host fails
-INDEX_HOSTS = [
-    "index.commoncrawl.org",
-    "us-east.index.commoncrawl.org",
-    "us-west.index.commoncrawl.org",
-]
+INDEX_URL = "https://index.commoncrawl.org/{snapshot}-index?url={enc}&output=json&page={page}"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -47,6 +41,9 @@ DEFAULT_BATCH_SIZE = 500
 COLLINFO_URL       = "http://index.commoncrawl.org/collinfo.json"
 ALLOWED_PREFIXES   = ("/@", "/c/", "/channel/", "/user/", "/+")
 # ───────────────────────────────────────────────────────────────────────────────
+
+# Create one HTTPX client with HTTP/2 enabled
+httpx_client = httpx.Client(http2=True, headers={"User-Agent": USER_AGENT}, timeout=120)
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -69,7 +66,7 @@ def discover_snapshots(year, collinfo_path=None):
     if collinfo_path:
         data = json.load(open(collinfo_path))
     else:
-        resp = requests.get(COLLINFO_URL, headers={"User-Agent": USER_AGENT}, timeout=60)
+        resp = httpx_client.get(COLLINFO_URL)
         resp.raise_for_status()
         data = resp.json()
     snaps = sorted(c["id"] for c in data if c["id"].startswith(f"CC-MAIN-{year}-"))
@@ -91,35 +88,26 @@ def normalize_url(raw: str) -> str:
             return f"https://www.youtube.com/channel/{candidate}"
     return ""
 
-def fetch_index_records(snapshot, pattern, page, retries=5):
+def fetch_index_records(snapshot, pattern, page, retries=8):
     enc = quote(pattern, safe="/@+")
-    backoff = 1
-
-    for host in INDEX_HOSTS:
-        for attempt in range(1, retries+1):
-            url = f"https://{host}/{snapshot}-index?url={enc}&output=json&page={page}"
-            try:
-                resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=120)
-                if resp.status_code == 400:
-                    return []
-                if resp.status_code == 429:
-                    time.sleep(backoff)
-                    backoff *= 2
-                    continue
-                resp.raise_for_status()
-                return resp.text.splitlines()
-            except RequestException as e:
-                if attempt < retries:
-                    print(f"❗ retry {attempt} @ {host} for {snapshot} {pattern} page {page}: {e}",
-                          file=sys.stderr)
-                    time.sleep(backoff)
-                    backoff *= 2
-                else:
-                    print(f"⚠️ host {host} failed snapshot {snapshot} pattern {pattern} page {page}",
-                          file=sys.stderr)
-        # try next host
-    print(f"⚠️ all hosts failed for {snapshot} {pattern} page {page}", file=sys.stderr)
-    return []
+    url = INDEX_URL.format(snapshot=snapshot, enc=enc, page=page)
+    for attempt in range(1, retries+1):
+        try:
+            resp = httpx_client.get(url)
+            if resp.status_code == 400:
+                return []
+            if resp.status_code == 429:
+                time.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+            return resp.text.splitlines()
+        except httpx.HTTPError as e:
+            if attempt < retries:
+                print(f"❗ retry {attempt} for {snapshot} {pattern} page {page}: {e}", file=sys.stderr)
+                time.sleep(2 ** attempt)
+            else:
+                print(f"⚠️ skipping {snapshot} {pattern} page {page} after {retries} retries", file=sys.stderr)
+                return []
 
 def save_batch(client, table_ref, urls):
     errs = client.insert_rows_json(table_ref, [{"url":u} for u in urls])
@@ -131,8 +119,8 @@ def main():
     snaps = discover_snapshots(args.year, args.collinfo_path)
     if args.start_snapshot:
         try:
-            i = snaps.index(args.start_snapshot)
-            snaps = snaps[i:]
+            idx = snaps.index(args.start_snapshot)
+            snaps = snaps[idx:]
         except ValueError:
             print(f"❌ start snapshot not found: {args.start_snapshot}", file=sys.stderr)
             sys.exit(1)
