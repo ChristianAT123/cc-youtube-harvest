@@ -31,7 +31,7 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
 
-      - name: Resume backfill from CC-MAIN-2024-33
+      - name: Resume backfill from CC-MAIN-2024-42
         run: |
           python cc_index_only.py \
             --year            2024 \
