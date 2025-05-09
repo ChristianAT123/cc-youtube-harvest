@@ -33,8 +33,8 @@ def parse_args():
         default=datetime.datetime.now(timezone.utc),
         help="YYYY-MM-DD, defaults to now"
     )
-    p.add_argument("--bq-dataset",   required=True, help="BigQuery dataset")
-    p.add_argument("--bq-table",     required=True, help="BigQuery table")
+    p.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
+    p.add_argument("--bq-table",   required=True, help="BigQuery table")
     p.add_argument(
         "--batch-size", type=int, default=500,
         help="Rows per insert batch"
@@ -48,31 +48,33 @@ def month_boundaries(start_dt, end_dt):
         last = calendar.monthrange(year, month)[1]
         ms = current
         me = datetime.datetime(year, month, last, tzinfo=timezone.utc)
-        if me > end_dt:
-            me = end_dt
+        if me > end_dt: me = end_dt
         yield ms, me
-        # advance
+        # next month
         if month == 12:
             current = current.replace(year=year+1, month=1, day=1)
         else:
             current = current.replace(month=month+1, day=1)
 
+def week_ranges(start_dt, end_dt, days=7):
+    cur = start_dt
+    while cur <= end_dt:
+        we = min(cur + timedelta(days=days-1), end_dt)
+        yield cur.strftime("%Y%m%d"), we.strftime("%Y%m%d")
+        cur = we + timedelta(days=1)
+
 def stream_cdx(match_type, pattern, frm, to):
-    """
-    Stream all captures via resumeKey.
-    """
     base = "https://web.archive.org/cdx/search/cdx"
-    # initial params
     params = {
         "url":           pattern,
         "matchType":     match_type,
         "from":          frm,
         "to":            to,
-        "output":        "json",
-        "fl":            "original",
         "filter":        "statuscode:200",
         "collapse":      "urlkey",
         "showResumeKey": "true",
+        "output":        "json",
+        "fl":            "original",
     }
 
     all_urls = []
@@ -80,22 +82,20 @@ def stream_cdx(match_type, pattern, frm, to):
         r = requests.get(base, params=params, timeout=60)
         r.raise_for_status()
         data = r.json()
-        # rows are data[1:]
+        # collect URLs
         for rec in data[1:]:
             all_urls.append(rec[0])
-        # last element’s resumeKey
-        resume = data[-1][-1]
+        resume = data[-1][-1]  # last record's resumeKey
         if not resume:
             break
-        # prepare next request
         params = {
             "url":       pattern,
             "matchType": match_type,
-            "output":    "json",
-            "fl":        "original",
+            "resumeKey": resume,
             "filter":    "statuscode:200",
             "collapse":  "urlkey",
-            "resumeKey": resume,
+            "output":    "json",
+            "fl":        "original",
         }
         time.sleep(1)
     return all_urls
@@ -118,8 +118,8 @@ def fetch_existing(client, ds, tbl):
     return {row.url for row in client.query(sql).result()}
 
 def insert_rows(client, ds, tbl, rows):
-    table = client.dataset(ds).table(tbl)
-    errs = client.insert_rows_json(table, rows)
+    ref = client.dataset(ds).table(tbl)
+    errs = client.insert_rows_json(ref, rows)
     if errs:
         print("  ❌ Insert errors:", errs)
     else:
@@ -136,29 +136,28 @@ def main():
     total  = 0
 
     for ms, me in month_boundaries(start, end):
-        frm = ms.strftime("%Y%m%d")
-        to  = me.strftime("%Y%m%d")
         print(f"\n=== Month: {ms:%Y-%m} → {me:%Y-%m-%d} ===")
         for mt, pat in PATTERNS:
             print(f"--- Pattern: {pat} ---")
-            raws = stream_cdx(mt, pat, frm, to)
-            print(f"  ■ Retrieved {len(raws)} total URLs for {pat}")
-            for raw in raws:
-                url = normalize_url(raw)
-                if not url or url in seen:
-                    continue
-                seen.add(url)
-                batch.append({
-                    "url":         url,
-                    "source":      "wayback",
-                    "ingested_at": datetime.datetime.now(timezone.utc).isoformat()
-                })
-                if len(batch) >= args.batch_size:
-                    insert_rows(client, args.bq_dataset, args.bq_table, batch)
-                    total += len(batch)
-                    batch.clear()
+            for frm, to in week_ranges(ms, me):
+                print(f"→ Window {frm}→{to}")
+                raws = stream_cdx(mt, pat, frm, to)
+                print(f"   ■ {len(raws)} URLs")
+                for raw in raws:
+                    url = normalize_url(raw)
+                    if not url or url in seen:
+                        continue
+                    seen.add(url)
+                    batch.append({
+                        "url":         url,
+                        "source":      "wayback",
+                        "ingested_at": datetime.datetime.now(timezone.utc).isoformat()
+                    })
+                    if len(batch) >= args.batch_size:
+                        insert_rows(client, args.bq_dataset, args.bq_table, batch)
+                        total += len(batch)
+                        batch.clear()
 
-    # flush remainder
     if batch:
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
         total += len(batch)
