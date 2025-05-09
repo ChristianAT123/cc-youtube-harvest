@@ -8,25 +8,36 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        year: [2018,2019,2020,2021,2022,2023,2024,2025]
+        year:  [2018,2019,2020,2021,2022,2023,2024,2025]
         month: [01,02,03,04,05,06,07,08,09,10,11,12]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.x'
-      - run: |
+
+      - name: Install dependencies
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - uses: google-github-actions/auth@v1
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-      - uses: google-github-actions/setup-gcloud@v1
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v1
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
-      - run: |
+
+      - name: Backfill Wayback for ${{ matrix.year }}-${{ matrix.month }}
+        run: |
           python wayback_cdx_sourcer.py \
             --start-date ${{ matrix.year }}-${{ matrix.month }}-01 \
             --bq-dataset ${{ secrets.BQ_DATASET }} \
-            --bq-table ${{ secrets.BQ_TABLE }}
+            --bq-table   ${{ secrets.BQ_TABLE }}
