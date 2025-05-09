@@ -9,7 +9,6 @@ from urllib.parse import urlparse, unquote
 from google.cloud import bigquery
 from datetime import timedelta, timezone
 
-# matchType + prefix combos we want
 PATTERNS = [
     ("prefix", "www.youtube.com/@"),
     ("prefix", "www.youtube.com/c/"),
@@ -34,8 +33,8 @@ def parse_args():
         default=datetime.datetime.now(timezone.utc),
         help="YYYY-MM-DD, defaults to now"
     )
-    p.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
-    p.add_argument("--bq-table",   required=True, help="BigQuery table")
+    p.add_argument("--bq-dataset",   required=True, help="BigQuery dataset")
+    p.add_argument("--bq-table",     required=True, help="BigQuery table")
     p.add_argument(
         "--batch-size", type=int, default=500,
         help="Rows per insert batch"
@@ -43,7 +42,6 @@ def parse_args():
     return p.parse_args()
 
 def month_boundaries(start_dt, end_dt):
-    """Yield (month_start, month_end) for each calendar month."""
     current = start_dt.replace(day=1)
     while current <= end_dt:
         year, month = current.year, current.month
@@ -53,54 +51,58 @@ def month_boundaries(start_dt, end_dt):
         if me > end_dt:
             me = end_dt
         yield ms, me
-        # advance to first of next month
+        # advance
         if month == 12:
             current = current.replace(year=year+1, month=1, day=1)
         else:
             current = current.replace(month=month+1, day=1)
 
-def query_cdx_paginated(match_type, pattern, frm, to):
+def stream_cdx(match_type, pattern, frm, to):
     """
-    Use CDX pagination so we never time out on large windows.
+    Stream all captures via resumeKey.
     """
     base = "https://web.archive.org/cdx/search/cdx"
-    common = {
-        "url":       pattern,
-        "matchType": match_type,
-        "filter":    "statuscode:200",
-        "collapse":  "urlkey",
+    # initial params
+    params = {
+        "url":           pattern,
+        "matchType":     match_type,
+        "from":          frm,
+        "to":            to,
+        "output":        "json",
+        "fl":            "original",
+        "filter":        "statuscode:200",
+        "collapse":      "urlkey",
+        "showResumeKey": "true",
     }
 
-    # 1) ask how many pages
-    resp = requests.get(base, params={**common, "showNumPages": "true"})
-    resp.raise_for_status()
-    pages = int(resp.text.strip())
-
-    all_rows = []
-    for page in range(pages):
-        params = {
-            **common,
-            "page":   page,
-            "from":   frm,
-            "to":     to,
-            "output": "json",
-            "fl":     "original",
-        }
-        r = requests.get(base, params=params)
+    all_urls = []
+    while True:
+        r = requests.get(base, params=params, timeout=60)
         r.raise_for_status()
         data = r.json()
-        rows = [r0[0] for r0 in data[1:]]
-        print(f"  ▶ Page {page+1}/{pages}: {len(rows)} records for {pattern} ({frm}→{to})")
-        all_rows.extend(rows)
-        # be polite
+        # rows are data[1:]
+        for rec in data[1:]:
+            all_urls.append(rec[0])
+        # last element’s resumeKey
+        resume = data[-1][-1]
+        if not resume:
+            break
+        # prepare next request
+        params = {
+            "url":       pattern,
+            "matchType": match_type,
+            "output":    "json",
+            "fl":        "original",
+            "filter":    "statuscode:200",
+            "collapse":  "urlkey",
+            "resumeKey": resume,
+        }
         time.sleep(1)
-
-    return all_rows
+    return all_urls
 
 def normalize_url(raw):
     p = urlparse(raw)
     path = unquote(p.path)
-    # drop bare prefixes
     if path.rstrip("/") in ("/@", "/c", "/channel/UC", "/user", "/+"):
         return None
     if "/browse/" in path and "UC" in path:
@@ -125,7 +127,7 @@ def insert_rows(client, ds, tbl, rows):
 
 def main():
     args = parse_args()
-    start = args.start_date or datetime.datetime(2018,1,1, tzinfo=timezone.utc)
+    start = args.start_date or datetime.datetime(2018,1,1,tzinfo=timezone.utc)
     end   = args.end_date
 
     client = bigquery.Client()
@@ -138,8 +140,9 @@ def main():
         to  = me.strftime("%Y%m%d")
         print(f"\n=== Month: {ms:%Y-%m} → {me:%Y-%m-%d} ===")
         for mt, pat in PATTERNS:
-            print(f"--- Pattern: {pat} ({mt}) ---")
-            raws = query_cdx_paginated(mt, pat, frm, to)
+            print(f"--- Pattern: {pat} ---")
+            raws = stream_cdx(mt, pat, frm, to)
+            print(f"  ■ Retrieved {len(raws)} total URLs for {pat}")
             for raw in raws:
                 url = normalize_url(raw)
                 if not url or url in seen:
