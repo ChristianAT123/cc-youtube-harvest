@@ -5,7 +5,7 @@ import argparse
 import datetime
 import time
 import requests
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, ReadTimeout, RequestException
 from urllib.parse import urlparse, unquote
 from google.cloud import bigquery
 
@@ -15,14 +15,14 @@ def parse_args():
     )
     parser.add_argument(
         "--start-date",
-        type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d"),
+        type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc),
         default=None,
         help="Start date (YYYY-MM-DD)"
     )
     parser.add_argument(
         "--end-date",
-        type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d"),
-        default=datetime.datetime.utcnow(),
+        type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc),
+        default=datetime.datetime.now(datetime.timezone.utc),
         help="End date (YYYY-MM-DD)"
     )
     parser.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
@@ -54,15 +54,14 @@ def query_cdx(from_ts, to_ts, max_retries=3):
         try:
             resp = requests.get(url, params=params, timeout=60)
             resp.raise_for_status()
-            data = resp.json()
-            for row in data[1:]:
+            for row in resp.json()[1:]:
                 yield row[0]
             return
-        except HTTPError as e:
-            print(f"  ⚠  HTTPError on {from_ts}-{to_ts} (attempt {attempt}/{max_retries}): {e}")
+        except (HTTPError, ReadTimeout, RequestException) as e:
+            print(f"  ⚠  Error on {from_ts}-{to_ts} (attempt {attempt}/{max_retries}): {e}")
             if attempt < max_retries:
                 backoff = attempt * 5
-                print(f"     retrying in {backoff}s...")
+                print(f"     retrying in {backoff}s…")
                 time.sleep(backoff)
             else:
                 print("     max retries reached, skipping this range")
@@ -94,7 +93,7 @@ def insert_rows(client, dataset, table, rows):
 
 def main():
     args = parse_args()
-    start = args.start_date or datetime.datetime(2018, 1, 1)
+    start = args.start_date or datetime.datetime(2018, 1, 1, tzinfo=datetime.timezone.utc)
     end   = args.end_date
     client = bigquery.Client()
     seen = fetch_existing(client, args.bq_dataset, args.bq_table)
@@ -111,7 +110,7 @@ def main():
             batch.append({
                 "url":         norm,
                 "source":      "wayback",
-                "ingested_at": datetime.datetime.utcnow().isoformat()
+                "ingested_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
             })
             if len(batch) >= args.batch_size:
                 insert_rows(client, args.bq_dataset, args.bq_table, batch)
