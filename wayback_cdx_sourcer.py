@@ -14,7 +14,7 @@ PATTERNS = [
 ]
 
 def parse_args():
-    p = argparse.ArgumentParser("7‑day window, paged CDX backfill")
+    p = argparse.ArgumentParser("14‑day window, paged CDX backfill")
     p.add_argument("--start-date",
         type=lambda s: datetime.datetime.strptime(s, "%Y%m%d").replace(tzinfo=timezone.utc),
         default=None)
@@ -24,7 +24,7 @@ def parse_args():
     p.add_argument("--bq-dataset", required=True)
     p.add_argument("--bq-table",   required=True)
     p.add_argument("--batch-size", type=int, default=500)
-    p.add_argument("--page-size",  type=int, default=500)
+    p.add_argument("--page-size",  type=int, default=1000)
     return p.parse_args()
 
 def month_boundaries(start, end):
@@ -35,7 +35,7 @@ def month_boundaries(start, end):
         yield cur, me
         cur = (cur + timedelta(days=32)).replace(day=1)
 
-def week_ranges(start, end, days=7):
+def window_ranges(start, end, days=14):
     cur = start
     while cur <= end:
         we = min(cur + timedelta(days=days-1), end)
@@ -86,9 +86,7 @@ def fetch_existing(client, ds, tbl):
     return {r.url for r in client.query(f"SELECT url FROM `{ds}.{tbl}`").result()}
 
 def insert_rows(client, ds, tbl, rows):
-    errs = client.insert_rows_json(client.dataset(ds).table(tbl), rows)
-    if not errs:
-        print(f"Inserted {len(rows)} rows")
+    client.insert_rows_json(client.dataset(ds).table(tbl), rows)
 
 def main():
     args  = parse_args()
@@ -99,17 +97,13 @@ def main():
     batch, total = [], 0
 
     for ms, me in month_boundaries(start, end):
-        print(f"\n=== Month: {ms:%Y-%m} → {me:%Y-%m-%d} ===")
         for mt, pat in PATTERNS:
-            print(f"--- Pattern: {pat} ---")
-            for frm, to in week_ranges(ms, me):
-                print(f"→ Window {frm}→{to}")
+            for frm, to in window_ranges(ms, me):
                 page = 1
                 while True:
                     raws = fetch_page(pat, mt, frm, to, page, args.page_size)
                     if not raws:
                         break
-                    print(f"  ▶ page {page}: {len(raws)} hits")
                     for raw in raws:
                         url = normalize(raw)
                         if url and url not in seen:
@@ -132,7 +126,7 @@ def main():
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
         total += len(batch)
 
-    print(f"\n✅ Total new: {total}")
+    print(total)
 
 if __name__ == "__main__":
     main()
