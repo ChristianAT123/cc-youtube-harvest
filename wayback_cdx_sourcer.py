@@ -14,7 +14,7 @@ PATTERNS = [
 ]
 
 def parse_args():
-    p = argparse.ArgumentParser("Daily, paged CDX backfill")
+    p = argparse.ArgumentParser("7‑day window, paged CDX backfill")
     p.add_argument("--start-date",
         type=lambda s: datetime.datetime.strptime(s, "%Y%m%d").replace(tzinfo=timezone.utc),
         default=None)
@@ -24,22 +24,31 @@ def parse_args():
     p.add_argument("--bq-dataset", required=True)
     p.add_argument("--bq-table",   required=True)
     p.add_argument("--batch-size", type=int, default=500)
-    p.add_argument("--page-size",  type=int, default=100)
+    p.add_argument("--page-size",  type=int, default=500)
     return p.parse_args()
 
-def daterange(start, end):
+def month_boundaries(start, end):
+    cur = start.replace(day=1)
+    while cur <= end:
+        last = (cur.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        me = last if last <= end else end
+        yield cur, me
+        cur = (cur + timedelta(days=32)).replace(day=1)
+
+def week_ranges(start, end, days=7):
     cur = start
     while cur <= end:
-        yield cur
-        cur += timedelta(days=1)
+        we = min(cur + timedelta(days=days-1), end)
+        yield cur.strftime("%Y%m%d"), we.strftime("%Y%m%d")
+        cur = we + timedelta(days=1)
 
-def fetch_page(pattern, mt, day, page, limit):
+def fetch_page(pattern, mt, frm, to, page, limit):
     url = "https://web.archive.org/cdx/search/cdx"
     params = {
         "url":       pattern,
         "matchType": mt,
-        "from":      day,
-        "to":        day,
+        "from":      frm,
+        "to":        to,
         "output":    "json",
         "fl":        "original",
         "filter":    "statuscode:200",
@@ -66,8 +75,8 @@ def fetch_page(pattern, mt, day, page, limit):
 def normalize(raw):
     path = unquote(urlparse(raw).path)
     if path.startswith("/channel/UC"):
-        channel_id = path.split("/")[2]
-        return f"https://www.youtube.com/channel/{channel_id}"
+        cid = path.split("/")[2]
+        return f"https://www.youtube.com/channel/{cid}"
     for pre in ("/@", "/c/", "/user/", "/+/"):
         if path.startswith(pre):
             return f"https://www.youtube.com{path.rstrip('/')}"
@@ -83,40 +92,41 @@ def insert_rows(client, ds, tbl, rows):
 
 def main():
     args  = parse_args()
-    start = args.start_date or datetime.datetime(2018, 1, 1, tzinfo=timezone.utc)
+    start = args.start_date or datetime.datetime(20180101, tzinfo=timezone.utc)
     end   = args.end_date
     client = bigquery.Client()
     seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
     batch, total = [], 0
 
-    for single in daterange(start, end):
-        day = single.strftime("%Y%m%d")
-        print(f"\n=== Date: {day} ===")
+    for ms, me in month_boundaries(start, end):
+        print(f"\n=== Month: {ms:%Y-%m} → {me:%Y-%m-%d} ===")
         for mt, pat in PATTERNS:
             print(f"--- Pattern: {pat} ---")
-            page = 1
-            while True:
-                raws = fetch_page(pat, mt, day, page, args.page_size)
-                if not raws:
-                    break
-                print(f"  ▶ page {page}: {len(raws)} hits")
-                for raw in raws:
-                    url = normalize(raw)
-                    if url and url not in seen:
-                        seen.add(url)
-                        batch.append({
-                            "url":         url,
-                            "source":      "wayback",
-                            "ingested_at": datetime.datetime.now(timezone.utc).isoformat(),
-                        })
-                if len(batch) >= args.batch_size:
-                    insert_rows(client, args.bq_dataset, args.bq_table, batch)
-                    total += len(batch)
-                    batch.clear()
-                if len(raws) < args.page_size:
-                    break
-                page += 1
-                time.sleep(0.5)
+            for frm, to in week_ranges(ms, me):
+                print(f"→ Window {frm}→{to}")
+                page = 1
+                while True:
+                    raws = fetch_page(pat, mt, frm, to, page, args.page_size)
+                    if not raws:
+                        break
+                    print(f"  ▶ page {page}: {len(raws)} hits")
+                    for raw in raws:
+                        url = normalize(raw)
+                        if url and url not in seen:
+                            seen.add(url)
+                            batch.append({
+                                "url":         url,
+                                "source":      "wayback",
+                                "ingested_at": datetime.datetime.now(timezone.utc).isoformat(),
+                            })
+                    if len(batch) >= args.batch_size:
+                        insert_rows(client, args.bq_dataset, args.bq_table, batch)
+                        total += len(batch)
+                        batch.clear()
+                    if len(raws) < args.page_size:
+                        break
+                    page += 1
+                    time.sleep(0.5)
 
     if batch:
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
