@@ -81,9 +81,9 @@ def normalize_url(raw):
     if "/browse/" in path and "UC" in path:
         i = path.find("UC")
         return f"https://www.youtube.com/channel/{path[i:]}"
-    for prefix in ["/@", "/c/", "/channel/", "/user/", "/+ "]:
+    for prefix in ["/@", "/c/", "/channel/", "/user/", "/+/"]:
         if path.startswith(prefix):
-            return f"https://www.youtube.com{path.rstrip('/')}"
+            return f"https://www.youtube.com{path}".rstrip('/')
     return None
 
 def fetch_existing(client, ds, tbl):
@@ -103,7 +103,7 @@ def main():
     start = args.start_date or datetime.datetime(2018, 1, 1)
     end   = args.end_date
     client = bigquery.Client()
-    seen   = fetch_existing(client, args.bq-dataset, args.bq-table)
+    seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
     total_inserted = 0
     batch = []
 
@@ -119,8 +119,8 @@ def main():
                 seen.add(norm)
                 new_count += 1
                 batch.append({
-                    "url":         norm,
-                    "source":      "wayback",
+                    "url": norm,
+                    "source": "wayback",
                     "ingested_at": datetime.datetime.utcnow().isoformat()
                 })
                 if len(batch) >= args.batch_size:
