@@ -15,12 +15,16 @@ PATTERNS = [
 
 def parse_args():
     p = argparse.ArgumentParser("Daily, paged CDX backfill")
-    p.add_argument("--start-date",  type=lambda s: datetime.datetime.strptime(s,"%Y%m%d").replace(tzinfo=timezone.utc), default=None)
-    p.add_argument("--end-date",    type=lambda s: datetime.datetime.strptime(s,"%Y%m%d").replace(tzinfo=timezone.utc), default=datetime.datetime.now(timezone.utc))
-    p.add_argument("--bq-dataset",   required=True)
-    p.add_argument("--bq-table",     required=True)
-    p.add_argument("--batch-size",   type=int, default=500)
-    p.add_argument("--page-size",    type=int, default=100)
+    p.add_argument("--start-date",
+        type=lambda s: datetime.datetime.strptime(s, "%Y%m%d").replace(tzinfo=timezone.utc),
+        default=None)
+    p.add_argument("--end-date",
+        type=lambda s: datetime.datetime.strptime(s, "%Y%m%d").replace(tzinfo=timezone.utc),
+        default=datetime.datetime.now(timezone.utc))
+    p.add_argument("--bq-dataset", required=True)
+    p.add_argument("--bq-table",   required=True)
+    p.add_argument("--batch-size", type=int, default=500)
+    p.add_argument("--page-size",  type=int, default=100)
     return p.parse_args()
 
 def daterange(start, end):
@@ -61,15 +65,12 @@ def fetch_page(pattern, mt, day, page, limit):
 
 def normalize(raw):
     path = unquote(urlparse(raw).path)
-    bare = path.rstrip("/")
-    if bare in ("/@", "/c", "/channel/UC", "/user", "/+"):
-        return None
-    if "/browse/" in path and "UC" in path:
-        i = path.find("UC")
-        return f"https://www.youtube.com/channel/{path[i:]}"
-    for pre in ("/@", "/c/", "/channel/", "/user/", "/+/"):
+    if path.startswith("/channel/UC"):
+        channel_id = path.split("/")[2]
+        return f"https://www.youtube.com/channel/{channel_id}"
+    for pre in ("/@", "/c/", "/user/", "/+/"):
         if path.startswith(pre):
-            return f"https://www.youtube.com{path}".rstrip("/")
+            return f"https://www.youtube.com{path.rstrip('/')}"
     return None
 
 def fetch_existing(client, ds, tbl):
@@ -82,7 +83,7 @@ def insert_rows(client, ds, tbl, rows):
 
 def main():
     args  = parse_args()
-    start = args.start_date or datetime.datetime(20180101, tzinfo=timezone.utc)
+    start = args.start_date or datetime.datetime(2018, 1, 1, tzinfo=timezone.utc)
     end   = args.end_date
     client = bigquery.Client()
     seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
@@ -103,7 +104,11 @@ def main():
                     url = normalize(raw)
                     if url and url not in seen:
                         seen.add(url)
-                        batch.append({"url":url,"source":"wayback","ingested_at":datetime.datetime.now(timezone.utc).isoformat()})
+                        batch.append({
+                            "url":         url,
+                            "source":      "wayback",
+                            "ingested_at": datetime.datetime.now(timezone.utc).isoformat(),
+                        })
                 if len(batch) >= args.batch_size:
                     insert_rows(client, args.bq_dataset, args.bq_table, batch)
                     total += len(batch)
