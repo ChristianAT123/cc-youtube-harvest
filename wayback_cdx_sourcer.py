@@ -8,6 +8,7 @@ import calendar
 from urllib.parse import urlparse, unquote
 from google.cloud import bigquery
 from datetime import timedelta, timezone
+from requests.exceptions import HTTPError, RequestException
 
 PATTERNS = [
     ("prefix", "www.youtube.com/@"),
@@ -44,17 +45,17 @@ def parse_args():
 def month_boundaries(start_dt, end_dt):
     current = start_dt.replace(day=1)
     while current <= end_dt:
-        year, month = current.year, current.month
-        last = calendar.monthrange(year, month)[1]
+        y, m = current.year, current.month
+        last = calendar.monthrange(y, m)[1]
         ms = current
-        me = datetime.datetime(year, month, last, tzinfo=timezone.utc)
+        me = datetime.datetime(y, m, last, tzinfo=timezone.utc)
         if me > end_dt: me = end_dt
         yield ms, me
-        # next month
-        if month == 12:
-            current = current.replace(year=year+1, month=1, day=1)
+        # advance to next month
+        if m == 12:
+            current = current.replace(year=y+1, month=1, day=1)
         else:
-            current = current.replace(month=month+1, day=1)
+            current = current.replace(month=m+1, day=1)
 
 def week_ranges(start_dt, end_dt, days=7):
     cur = start_dt
@@ -63,7 +64,10 @@ def week_ranges(start_dt, end_dt, days=7):
         yield cur.strftime("%Y%m%d"), we.strftime("%Y%m%d")
         cur = we + timedelta(days=1)
 
-def stream_cdx(match_type, pattern, frm, to):
+def stream_cdx(pattern, match_type, frm, to):
+    """
+    Try one resumeKey-stream; on HTTPError return None.
+    """
     base = "https://web.archive.org/cdx/search/cdx"
     params = {
         "url":           pattern,
@@ -77,17 +81,17 @@ def stream_cdx(match_type, pattern, frm, to):
         "fl":            "original",
     }
 
-    all_urls = []
-    while True:
+    try:
         r = requests.get(base, params=params, timeout=60)
         r.raise_for_status()
         data = r.json()
-        # collect URLs
-        for rec in data[1:]:
-            all_urls.append(rec[0])
-        resume = data[-1][-1]  # last record's resumeKey
-        if not resume:
-            break
+    except (HTTPError, RequestException) as e:
+        print(f"  ⚠ resumeKey stream failed for {pattern} ({frm}→{to}): {e}")
+        return None
+
+    all_urls = [rec[0] for rec in data[1:]]
+    resume = data[-1][-1]
+    while resume:
         params = {
             "url":       pattern,
             "matchType": match_type,
@@ -98,6 +102,12 @@ def stream_cdx(match_type, pattern, frm, to):
             "fl":        "original",
         }
         time.sleep(1)
+        r = requests.get(base, params=params, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        urls = [rec[0] for rec in data[1:]]
+        all_urls.extend(urls)
+        resume = data[-1][-1]
     return all_urls
 
 def normalize_url(raw):
@@ -125,44 +135,56 @@ def insert_rows(client, ds, tbl, rows):
     else:
         print(f"  ▶ Inserted {len(rows)} rows")
 
-def main():
-    args = parse_args()
-    start = args.start_date or datetime.datetime(2018,1,1,tzinfo=timezone.utc)
-    end   = args.end_date
-
+def backfill():
+    args   = parse_args()
     client = bigquery.Client()
     seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
     batch  = []
     total  = 0
 
+    start = args.start_date or datetime.datetime(2018,1,1,tzinfo=timezone.utc)
+    end   = args.end_date
+
     for ms, me in month_boundaries(start, end):
         print(f"\n=== Month: {ms:%Y-%m} → {me:%Y-%m-%d} ===")
-        for mt, pat in PATTERNS:
-            print(f"--- Pattern: {pat} ---")
+        for match_type, pattern in PATTERNS:
+            print(f"--- Pattern: {pattern} ---")
             for frm, to in week_ranges(ms, me):
                 print(f"→ Window {frm}→{to}")
-                raws = stream_cdx(mt, pat, frm, to)
-                print(f"   ■ {len(raws)} URLs")
-                for raw in raws:
-                    url = normalize_url(raw)
-                    if not url or url in seen:
-                        continue
-                    seen.add(url)
-                    batch.append({
-                        "url":         url,
-                        "source":      "wayback",
-                        "ingested_at": datetime.datetime.now(timezone.utc).isoformat()
-                    })
-                    if len(batch) >= args.batch_size:
-                        insert_rows(client, args.bq_dataset, args.bq_table, batch)
-                        total += len(batch)
-                        batch.clear()
+                urls = stream_cdx(pattern, match_type, frm, to)
+                # fallback to daily if week-level failed
+                if urls is None:
+                    for day_dt in (ms + timedelta(d) for d in range((me-ms).days+1)):
+                        d = day_dt.strftime("%Y%m%d")
+                        print(f"  ↳ Retry single-day {d}")
+                        urls = stream_cdx(pattern, match_type, d, d) or []
+                        for raw in urls:
+                            norm = normalize_url(raw)
+                            if not norm or norm in seen: continue
+                            seen.add(norm)
+                            batch.append({"url":norm,"source":"wayback","ingested_at":datetime.datetime.now(timezone.utc).isoformat()})
+                        if len(batch)>=args.batch_size:
+                            insert_rows(client,args.bq_dataset,args.bq_table,batch)
+                            total += len(batch)
+                            batch.clear()
+                    continue
+
+                print(f"   ■ {len(urls)} URLs")
+                for raw in urls:
+                    norm = normalize_url(raw)
+                    if not norm or norm in seen: continue
+                    seen.add(norm)
+                    batch.append({"url":norm,"source":"wayback","ingested_at":datetime.datetime.now(timezone.utc).isoformat()})
+                if len(batch)>=args.batch_size:
+                    insert_rows(client,args.bq_dataset,args.bq_table,batch)
+                    total += len(batch)
+                    batch.clear()
 
     if batch:
-        insert_rows(client, args.bq_dataset, args.bq_table, batch)
+        insert_rows(client,args.bq_dataset,args.bq_table,batch)
         total += len(batch)
 
     print(f"\n✅ Total unique channels added: {total}")
 
 if __name__ == "__main__":
-    main()
+    backfill()
