@@ -89,8 +89,9 @@ def insert_rows(client, ds, tbl, rows):
     client.insert_rows_json(client.dataset(ds).table(tbl), rows)
 
 def main():
+    print("Starting backfill…", flush=True)
     args  = parse_args()
-    start = args.start_date or datetime.datetime(2018, 1, 1, tzinfo=timezone.utc)
+    start = args.start_date or datetime.datetime(20180101, tzinfo=timezone.utc)
     end   = args.end_date
     client = bigquery.Client()
     seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
@@ -126,7 +127,7 @@ def main():
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
         total += len(batch)
 
-    print(total)
+    print(total, flush=True)
 
 if __name__ == "__main__":
     main()
