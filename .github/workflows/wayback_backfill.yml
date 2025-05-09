@@ -35,5 +35,5 @@ jobs:
         run: |
           python -u wayback_cdx_sourcer.py \
             --bq-dataset ${{ secrets.BQ_DATASET }} \
-            --bq-table   ${{ secrets.BQ_TABLE }} \
-            --window-size 7
+            --bq-table   ${{ secrets.BQ_TABLE }} 
+ 
