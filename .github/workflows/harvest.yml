@@ -1,4 +1,4 @@
-name: YouTube Channel Backfill Harvest
+name: YouTube Channel Multi‑Year Backfill
 
 on:
   workflow_dispatch:
@@ -6,6 +6,9 @@ on:
 jobs:
   backfill:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        year: [2018, 2019, 2020, 2021, 2022, 2023]
 
     steps:
       - name: Checkout repo
@@ -31,11 +34,11 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
 
-      - name: Run backfill for 2025
+      - name: Backfill CC‑MAIN for ${{ matrix.year }}
         run: |
           python cc_index_only.py \
-            --year            2025 \
-            --dataset         ${{ secrets.BQ_DATASET }} \
-            --table           ${{ secrets.BQ_TABLE }} \
-            --project         ${{ secrets.GCP_PROJECT }} \
-            --collinfo-path   collinfo.json
+            --year          ${{ matrix.year }} \
+            --dataset       ${{ secrets.BQ_DATASET }} \
+            --table         ${{ secrets.BQ_TABLE }} \
+            --project       ${{ secrets.GCP_PROJECT }} \
+            --collinfo-path collinfo.json
