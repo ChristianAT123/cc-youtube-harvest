@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 
 import argparse
-import datetime
+from datetime import datetime, timedelta, timezone
 import requests
 from urllib.parse import urlparse, unquote
 from google.cloud import bigquery
@@ -13,14 +13,14 @@ def parse_args():
     )
     parser.add_argument(
         "--start-date",
-        type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d"),
+        type=lambda s: datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc),
         default=None,
         help="Start date (YYYY-MM-DD)"
     )
     parser.add_argument(
         "--end-date",
-        type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d"),
-        default=datetime.datetime.utcnow(),
+        type=lambda s: datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc),
+        default=datetime.now(timezone.utc),
         help="End date (YYYY-MM-DD)"
     )
     parser.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
@@ -34,8 +34,8 @@ def parse_args():
 def generate_month_ranges(start_date, end_date):
     current = start_date.replace(day=1)
     while current <= end_date:
-        nxt = (current.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
-        yield current.strftime("%Y%m%d"), (nxt - datetime.timedelta(days=1)).strftime("%Y%m%d")
+        nxt = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
+        yield current.strftime("%Y%m%d"), (nxt - timedelta(days=1)).strftime("%Y%m%d")
         current = nxt
 
 def query_cdx(from_ts, to_ts):
@@ -79,7 +79,7 @@ def insert_rows(client, dataset, table, rows):
 
 def main():
     args = parse_args()
-    start = args.start_date or datetime.datetime(2018, 1, 1)
+    start = args.start_date or datetime(2018, 1, 1, tzinfo=timezone.utc)
     end   = args.end_date
     client = bigquery.Client()
     seen = fetch_existing(client, args.bq_dataset, args.bq_table)
@@ -96,7 +96,7 @@ def main():
             batch.append({
                 "url":         norm,
                 "source":      "wayback",
-                "ingested_at": datetime.datetime.utcnow().isoformat()
+                "ingested_at": datetime.now(timezone.utc).isoformat()
             })
             if len(batch) >= args.batch_size:
                 insert_rows(client, args.bq_dataset, args.bq_table, batch)
