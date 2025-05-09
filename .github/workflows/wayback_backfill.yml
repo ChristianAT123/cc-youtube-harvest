@@ -36,4 +36,8 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT }}
 
       - name: Backfill Wayback for ${{ matrix.year }}-${{ matrix.month }}
-        run: python wayback_cdx_sourcer.py --start-date ${{ matrix.year }}-${{ matrix.month }}-01 --bq-dataset ${{ secrets.BQ_DATASET }} --bq-table ${{ secrets.BQ_TABLE }}
+        run: |
+          python -u wayback_cdx_sourcer.py \
+            --start-date ${{ matrix.year }}-${{ matrix.month }}-01 \
+            --bq-dataset ${{ secrets.BQ_DATASET }} \
+            --bq-table   ${{ secrets.BQ_TABLE }}
