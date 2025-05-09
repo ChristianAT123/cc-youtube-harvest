@@ -7,6 +7,7 @@ import requests
 from requests.exceptions import HTTPError, ReadTimeout, RequestException
 from urllib.parse import urlparse, unquote
 from google.cloud import bigquery
+from datetime import timedelta
 
 # Only match real channel URL prefixes (including UC IDs)
 PATTERNS = [
@@ -33,22 +34,32 @@ def parse_args():
         default=datetime.datetime.utcnow(),
         help="End date (YYYY-MM-DD)"
     )
-    parser.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
-    parser.add_argument("--bq-table",   required=True, help="BigQuery table")
+    parser.add_argument("--bq-dataset",   required=True, help="BigQuery dataset")
+    parser.add_argument("--bq-table",     required=True, help="BigQuery table")
     parser.add_argument(
         "--batch-size",
         type=int,
         default=500,
         help="Rows per insertion batch"
     )
+    parser.add_argument(
+        "--window-size",
+        type=int,
+        default=7,
+        help="Number of days per CDX query window"
+    )
     return parser.parse_args()
 
-def generate_month_ranges(start, end):
-    current = start.replace(day=1)
+def generate_date_ranges(start, end, delta_days=7):
+    """
+    Yield (from_ts, to_ts) for consecutive windows of delta_days,
+    formatted as YYYYMMDD strings.
+    """
+    current = start
     while current <= end:
-        nxt = (current.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
-        yield current.strftime("%Y%m%d"), (nxt - datetime.timedelta(days=1)).strftime("%Y%m%d")
-        current = nxt
+        window_end = min(current + timedelta(days=delta_days - 1), end)
+        yield current.strftime("%Y%m%d"), window_end.strftime("%Y%m%d")
+        current = window_end + timedelta(days=1)
 
 def query_cdx(match_type, pattern, from_ts, to_ts, max_retries=3, timeout=60):
     url = "https://web.archive.org/cdx/search/cdx"
@@ -59,6 +70,8 @@ def query_cdx(match_type, pattern, from_ts, to_ts, max_retries=3, timeout=60):
         "fl":        "original",
         "from":      from_ts,
         "to":        to_ts,
+        "filter":    "statuscode:200",  # only 200-OK captures
+        "collapse":  "urlkey",          # dedupe exact URLs
     }
     for attempt in range(1, max_retries + 1):
         try:
@@ -66,21 +79,33 @@ def query_cdx(match_type, pattern, from_ts, to_ts, max_retries=3, timeout=60):
             resp.raise_for_status()
             data = resp.json()
             rows = [r[0] for r in data[1:]]
-            print(f"  Retrieved {len(rows)} records for {pattern}")
+            print(f"  Retrieved {len(rows)} records for {pattern} ({from_ts}→{to_ts})")
             return rows
         except (HTTPError, ReadTimeout, RequestException) as e:
-            print(f"  ⚠ Error {attempt}/{max_retries} for {pattern}: {e}")
+            print(f"  ⚠ Error {attempt}/{max_retries} for {pattern} ({from_ts}→{to_ts}): {e}")
             if attempt < max_retries:
                 time.sleep(attempt * 5)
-    print(f"  ↪ Skipping {pattern} after {max_retries} failures")
+    print(f"  ↪ Skipping {pattern} for {from_ts}→{to_ts} after {max_retries} failures")
     return []
 
 def normalize_url(raw):
+    """
+    - Reject bare prefixes (e.g. /channel/UC with no ID)
+    - Turn /browse/...UC... into /channel/UCxxxx
+    - Keep only valid prefix paths
+    """
     p = urlparse(raw)
     path = unquote(p.path)
+    # drop *exact* prefix-only hits
+    bare = path.rstrip("/")
+    if bare in ("/@", "/c", "/channel/UC", "/user", "/+"):
+        return None
+
+    # handle legacy /browse/...UCxxx
     if "/browse/" in path and "UC" in path:
         i = path.find("UC")
         return f"https://www.youtube.com/channel/{path[i:]}"
+    # normal prefixes
     for prefix in ["/@", "/c/", "/channel/", "/user/", "/+/"]:
         if path.startswith(prefix):
             return f"https://www.youtube.com{path}".rstrip('/')
@@ -107,8 +132,8 @@ def main():
     total_inserted = 0
     batch = []
 
-    for frm, to in generate_month_ranges(start, end):
-        print(f"\nProcessing snapshot {frm} → {to}")
+    for frm, to in generate_date_ranges(start, end, delta_days=args.window_size):
+        print(f"\nProcessing window {frm} → {to}")
         new_count = 0
         for match_type, pattern in PATTERNS:
             print(f"--- Pattern: {pattern} ({match_type}) ---")
@@ -119,15 +144,15 @@ def main():
                 seen.add(norm)
                 new_count += 1
                 batch.append({
-                    "url": norm,
-                    "source": "wayback",
+                    "url":         norm,
+                    "source":      "wayback",
                     "ingested_at": datetime.datetime.utcnow().isoformat()
                 })
                 if len(batch) >= args.batch_size:
                     insert_rows(client, args.bq_dataset, args.bq_table, batch)
                     total_inserted += len(batch)
                     batch.clear()
-        print(f"  New candidates this snapshot: {new_count}")
+        print(f"  New candidates this window: {new_count}")
 
     if batch:
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
