@@ -3,7 +3,6 @@
 
 import argparse
 import datetime
-from datetime import timezone
 import requests
 from urllib.parse import urlparse, unquote
 from google.cloud import bigquery
@@ -21,7 +20,7 @@ def parse_args():
     parser.add_argument(
         "--end-date",
         type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d"),
-        default=datetime.datetime.now(timezone.utc),
+        default=datetime.datetime.utcnow(),
         help="End date (YYYY-MM-DD)"
     )
     parser.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
@@ -80,7 +79,7 @@ def insert_rows(client, dataset, table, rows):
 
 def main():
     args = parse_args()
-    start = args.start_date or datetime.datetime(2018, 1, 1, tzinfo=timezone.utc)
+    start = args.start_date or datetime.datetime(2018, 1, 1)
     end   = args.end_date
     client = bigquery.Client()
     seen = fetch_existing(client, args.bq_dataset, args.bq_table)
@@ -97,7 +96,7 @@ def main():
             batch.append({
                 "url":         norm,
                 "source":      "wayback",
-                "ingested_at": datetime.datetime.now(timezone.utc).isoformat()
+                "ingested_at": datetime.datetime.utcnow().isoformat()
             })
             if len(batch) >= args.batch_size:
                 insert_rows(client, args.bq_dataset, args.bq_table, batch)
