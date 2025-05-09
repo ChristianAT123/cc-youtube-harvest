@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
+
 import argparse
 import datetime
 import time
 import requests
 import calendar
-from requests.exceptions import HTTPError, ReadTimeout, RequestException
 from urllib.parse import urlparse, unquote
-from datetime import timedelta, timezone
 from google.cloud import bigquery
+from datetime import timedelta, timezone
 
+# matchType + prefix combos we want
 PATTERNS = [
     ("prefix", "www.youtube.com/@"),
     ("prefix", "www.youtube.com/c/"),
@@ -24,7 +25,8 @@ def parse_args():
     p.add_argument(
         "--start-date",
         type=lambda s: datetime.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc),
-        default=None, help="YYYY-MM-DD, defaults to 2018-01-01"
+        default=None,
+        help="YYYY-MM-DD, defaults to 2018-01-01"
     )
     p.add_argument(
         "--end-date",
@@ -32,60 +34,68 @@ def parse_args():
         default=datetime.datetime.now(timezone.utc),
         help="YYYY-MM-DD, defaults to now"
     )
-    p.add_argument("--bq-dataset", required=True)
-    p.add_argument("--bq-table",   required=True)
-    p.add_argument("--batch-size", type=int, default=500)
-    p.add_argument("--window-size", type=int, default=7)
+    p.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
+    p.add_argument("--bq-table",   required=True, help="BigQuery table")
+    p.add_argument(
+        "--batch-size", type=int, default=500,
+        help="Rows per insert batch"
+    )
     return p.parse_args()
 
 def month_boundaries(start_dt, end_dt):
-    """Yield (month_start_dt, month_end_dt) for each calendar month."""
+    """Yield (month_start, month_end) for each calendar month."""
     current = start_dt.replace(day=1)
     while current <= end_dt:
         year, month = current.year, current.month
-        last_day = calendar.monthrange(year, month)[1]
+        last = calendar.monthrange(year, month)[1]
         ms = current
-        me = datetime.datetime(year, month, last_day, tzinfo=timezone.utc)
+        me = datetime.datetime(year, month, last, tzinfo=timezone.utc)
         if me > end_dt:
             me = end_dt
         yield ms, me
-        # advance to 1st of next month
+        # advance to first of next month
         if month == 12:
             current = current.replace(year=year+1, month=1, day=1)
         else:
             current = current.replace(month=month+1, day=1)
 
-def date_windows(start_dt, end_dt, days):
-    cur = start_dt
-    while cur <= end_dt:
-        we = min(cur + timedelta(days=days-1), end_dt)
-        yield cur.strftime("%Y%m%d"), we.strftime("%Y%m%d")
-        cur = we + timedelta(days=1)
-
-def query_cdx(mt, pattern, frm, to, retries=3, timeout=60):
-    url = "https://web.archive.org/cdx/search/cdx"
-    params = {
-        "url":      pattern,
-        "matchType":mt,
-        "output":   "json",
-        "fl":       "original",
-        "from":     frm,
-        "to":       to,
-        "filter":   "statuscode:200",
-        "collapse": "urlkey",
+def query_cdx_paginated(match_type, pattern, frm, to):
+    """
+    Use CDX pagination so we never time out on large windows.
+    """
+    base = "https://web.archive.org/cdx/search/cdx"
+    common = {
+        "url":       pattern,
+        "matchType": match_type,
+        "filter":    "statuscode:200",
+        "collapse":  "urlkey",
     }
-    for i in range(1, retries+1):
-        try:
-            r = requests.get(url, params=params, timeout=timeout)
-            r.raise_for_status()
-            data = r.json()
-            return [row[0] for row in data[1:]]
-        except (HTTPError, ReadTimeout, RequestException) as e:
-            print(f"  ⚠ {i}/{retries} {pattern} ({frm}→{to}): {e}")
-            if i < retries:
-                time.sleep(i*5)
-    print(f"  ↪ give up {pattern} ({frm}→{to})")
-    return None
+
+    # 1) ask how many pages
+    resp = requests.get(base, params={**common, "showNumPages": "true"})
+    resp.raise_for_status()
+    pages = int(resp.text.strip())
+
+    all_rows = []
+    for page in range(pages):
+        params = {
+            **common,
+            "page":   page,
+            "from":   frm,
+            "to":     to,
+            "output": "json",
+            "fl":     "original",
+        }
+        r = requests.get(base, params=params)
+        r.raise_for_status()
+        data = r.json()
+        rows = [r0[0] for r0 in data[1:]]
+        print(f"  ▶ Page {page+1}/{pages}: {len(rows)} records for {pattern} ({frm}→{to})")
+        all_rows.extend(rows)
+        # be polite
+        time.sleep(1)
+
+    return all_rows
 
 def normalize_url(raw):
     p = urlparse(raw)
@@ -102,29 +112,35 @@ def normalize_url(raw):
     return None
 
 def fetch_existing(client, ds, tbl):
-    qry = f"SELECT url FROM `{ds}.{tbl}`"
-    return {row.url for row in client.query(qry).result()}
+    sql = f"SELECT url FROM `{ds}.{tbl}`"
+    return {row.url for row in client.query(sql).result()}
 
 def insert_rows(client, ds, tbl, rows):
-    ref = client.dataset(ds).table(tbl)
-    errs = client.insert_rows_json(ref, rows)
+    table = client.dataset(ds).table(tbl)
+    errs = client.insert_rows_json(table, rows)
     if errs:
         print("  ❌ Insert errors:", errs)
     else:
         print(f"  ▶ Inserted {len(rows)} rows")
 
-def process_month(mt, pat, ms, me, args, client, seen, batch, total):
-    """Slice [ms,me] into windows; auto-shrink on timeout; batch rows."""
-    def recurse(sdt, edt, win):
-        for frm, to in date_windows(sdt, edt, win):
-            hits = query_cdx(mt, pat, frm, to)
-            if hits is None:
-                if win > 1:
-                    recurse(sdt, edt, max(1, win//2))
-                else:
-                    print(f"    ↪ skip day {frm}")
-                continue
-            for raw in hits:
+def main():
+    args = parse_args()
+    start = args.start_date or datetime.datetime(2018,1,1, tzinfo=timezone.utc)
+    end   = args.end_date
+
+    client = bigquery.Client()
+    seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
+    batch  = []
+    total  = 0
+
+    for ms, me in month_boundaries(start, end):
+        frm = ms.strftime("%Y%m%d")
+        to  = me.strftime("%Y%m%d")
+        print(f"\n=== Month: {ms:%Y-%m} → {me:%Y-%m-%d} ===")
+        for mt, pat in PATTERNS:
+            print(f"--- Pattern: {pat} ({mt}) ---")
+            raws = query_cdx_paginated(mt, pat, frm, to)
+            for raw in raws:
                 url = normalize_url(raw)
                 if not url or url in seen:
                     continue
@@ -136,30 +152,15 @@ def process_month(mt, pat, ms, me, args, client, seen, batch, total):
                 })
                 if len(batch) >= args.batch_size:
                     insert_rows(client, args.bq_dataset, args.bq_table, batch)
-                    total[0] += len(batch)
+                    total += len(batch)
                     batch.clear()
-    print(f"\n=== Month: {ms.strftime('%Y-%m')} → {me.strftime('%Y-%m-%d')} ===")
-    recurse(ms, me, args.window_size)
 
-def main():
-    args = parse_args()
-    start = args.start_date or datetime.datetime(2018,1,1, tzinfo=timezone.utc)
-    end   = args.end_date
-    client = bigquery.Client()
-    seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
-    batch  = []
-    total  = [0]
-
-    for ms, me in month_boundaries(start, end):
-        for mt, pat in PATTERNS:
-            print(f"--- Pattern: {pat} ---")
-            process_month(mt, pat, ms, me, args, client, seen, batch, total)
-
+    # flush remainder
     if batch:
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
-        total[0] += len(batch)
+        total += len(batch)
 
-    print(f"\n✅ Total unique channels added: {total[0]}")
+    print(f"\n✅ Total unique channels added: {total}")
 
 if __name__ == "__main__":
     main()
