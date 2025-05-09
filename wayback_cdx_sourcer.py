@@ -98,13 +98,17 @@ def main():
     batch, total = [], 0
 
     for ms, me in month_boundaries(start, end):
+        print(f"\n=== Month: {ms:%Y-%m} → {me:%Y-%m-%d} ===", flush=True)
         for mt, pat in PATTERNS:
+            print(f"--- Pattern: {pat} ---", flush=True)
             for frm, to in window_ranges(ms, me):
+                print(f"→ Window {frm}→{to}", flush=True)
                 page = 1
                 while True:
                     raws = fetch_page(pat, mt, frm, to, page, args.page_size)
                     if not raws:
                         break
+                    print(f"  ▶ page {page}: {len(raws)} hits", flush=True)
                     for raw in raws:
                         url = normalize(raw)
                         if url and url not in seen:
@@ -127,7 +131,7 @@ def main():
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
         total += len(batch)
 
-    print(total, flush=True)
+    print(f"\n✅ Total new: {total}", flush=True)
 
 if __name__ == "__main__":
     main()
