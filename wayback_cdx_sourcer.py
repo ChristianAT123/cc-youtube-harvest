@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-
 import argparse, datetime, time, requests
 from urllib.parse import urlparse, unquote
 from google.cloud import bigquery
 from datetime import timedelta, timezone
+from requests.exceptions import HTTPError, RequestException, ConnectionError
 
 PATTERNS = [
     ("prefix", "www.youtube.com/@"),
@@ -14,33 +14,13 @@ PATTERNS = [
 ]
 
 def parse_args():
-    p = argparse.ArgumentParser("Daily, 100‑row paging CDX backfill")
-    p.add_argument(
-        "--start-date",
-        type=lambda s: datetime.datetime.strptime(s,"%Y-%m-%d").replace(tzinfo=timezone.utc),
-        default=None,
-        help="YYYY-MM-DD, defaults to 2018-01-01"
-    )
-    p.add_argument(
-        "--end-date",
-        type=lambda s: datetime.datetime.strptime(s,"%Y-%m-%d").replace(tzinfo=timezone.utc),
-        default=datetime.datetime.now(timezone.utc),
-        help="YYYY-MM-DD, defaults to now"
-    )
-    p.add_argument("--bq-dataset", required=True, help="BigQuery dataset")
-    p.add_argument("--bq-table",   required=True, help="BigQuery table")
-    p.add_argument(
-        "--batch-size",
-        type=int,
-        default=500,
-        help="Rows per BigQuery insert batch"
-    )
-    p.add_argument(
-        "--page-size",
-        type=int,
-        default=50000,
-        help="Max rows per CDX request"
-    )
+    p = argparse.ArgumentParser("Daily, paged CDX backfill")
+    p.add_argument("--start-date",  type=lambda s: datetime.datetime.strptime(s,"%Y-%m-%d").replace(tzinfo=timezone.utc), default=None)
+    p.add_argument("--end-date",    type=lambda s: datetime.datetime.strptime(s,"%Y-%m-%d").replace(tzinfo=timezone.utc), default=datetime.datetime.now(timezone.utc))
+    p.add_argument("--bq-dataset",   required=True)
+    p.add_argument("--bq-table",     required=True)
+    p.add_argument("--batch-size",   type=int, default=500)
+    p.add_argument("--page-size",    type=int, default=100)
     return p.parse_args()
 
 def daterange(start, end):
@@ -50,6 +30,7 @@ def daterange(start, end):
         cur += timedelta(days=1)
 
 def fetch_page(pattern, mt, day, page, limit):
+    url = "https://web.archive.org/cdx/search/cdx"
     params = {
         "url":       pattern,
         "matchType": mt,
@@ -62,10 +43,21 @@ def fetch_page(pattern, mt, day, page, limit):
         "limit":     limit,
         "page":      page,
     }
-    r = requests.get("https://web.archive.org/cdx/search/cdx", params=params, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    return [row[0] for row in data[1:]]
+    for attempt in range(1, 5):
+        try:
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            return [row[0] for row in r.json()[1:]]
+        except ConnectionError:
+            time.sleep(attempt * 2)
+        except HTTPError as e:
+            if 500 <= e.response.status_code < 600:
+                time.sleep(attempt * 2)
+            else:
+                break
+        except RequestException:
+            break
+    return []
 
 def normalize(raw):
     path = unquote(urlparse(raw).path)
@@ -81,24 +73,20 @@ def normalize(raw):
     return None
 
 def fetch_existing(client, ds, tbl):
-    q = f"SELECT url FROM `{ds}.{tbl}`"
-    return {r.url for r in client.query(q).result()}
+    return {r.url for r in client.query(f"SELECT url FROM `{ds}.{tbl}`").result()}
 
 def insert_rows(client, ds, tbl, rows):
     errs = client.insert_rows_json(client.dataset(ds).table(tbl), rows)
-    if errs:
-        print("Insert errors:", errs)
-    else:
+    if not errs:
         print(f"Inserted {len(rows)} rows")
 
 def main():
-    args    = parse_args()
-    start   = args.start_date or datetime.datetime(2018,1,1,tzinfo=timezone.utc)
-    end     = args.end_date
-    client  = bigquery.Client()
-    seen    = fetch_existing(client, args.bq_dataset, args.bq_table)
-    batch   = []
-    total   = 0
+    args  = parse_args()
+    start = args.start_date or datetime.datetime(2018,1,1,tzinfo=timezone.utc)
+    end   = args.end_date
+    client = bigquery.Client()
+    seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
+    batch, total = [], 0
 
     for single in daterange(start, end):
         day = single.strftime("%Y%m%d")
@@ -107,24 +95,15 @@ def main():
             print(f"--- Pattern: {pat} ---")
             page = 0
             while True:
-                try:
-                    raws = fetch_page(pat, mt, day, page, args.page_size)
-                except Exception as e:
-                    print(f"  ⚠ page {page} failed: {e}")
-                    break
+                raws = fetch_page(pat, mt, day, page, args.page_size)
                 if not raws:
                     break
                 print(f"  ▶ page {page}: {len(raws)} hits")
                 for raw in raws:
                     url = normalize(raw)
-                    if not url or url in seen:
-                        continue
-                    seen.add(url)
-                    batch.append({
-                        "url":         url,
-                        "source":      "wayback",
-                        "ingested_at": datetime.datetime.now(timezone.utc).isoformat(),
-                    })
+                    if url and url not in seen:
+                        seen.add(url)
+                        batch.append({"url":url,"source":"wayback","ingested_at":datetime.datetime.now(timezone.utc).isoformat()})
                 if len(batch) >= args.batch_size:
                     insert_rows(client, args.bq_dataset, args.bq_table, batch)
                     total += len(batch)
@@ -132,13 +111,13 @@ def main():
                 if len(raws) < args.page_size:
                     break
                 page += 1
-                time.sleep(0.5)  # gentle pacing
+                time.sleep(0.5)
 
     if batch:
         insert_rows(client, args.bq_dataset, args.bq_table, batch)
         total += len(batch)
 
-    print(f"\n✅ Done — total new channels: {total}")
+    print(f"\n✅ Total new: {total}")
 
 if __name__ == "__main__":
     main()
