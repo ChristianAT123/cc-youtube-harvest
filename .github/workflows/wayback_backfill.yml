@@ -8,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        year:  [2018,2019,2020,2021,2022,2023,2024,2025]
-        month: [01,02,03,04,05,06,07,08,09,10,11,12]
+        year:  ["2018","2019","2020","2021","2022","2023","2024","2025"]
+        month: ["01","02","03","04","05","06","07","08","09","10","11","12"]
 
     steps:
       - name: Checkout repo
@@ -36,4 +36,8 @@ jobs:
           project_id: ${{ secrets.GCP_PROJECT }}
 
       - name: Backfill Wayback for ${{ matrix.year }}-${{ matrix.month }}
-        run: python wayback_cdx_sourcer.py --start-date ${{ matrix.year }}-${{ matrix.month }}-01 --bq-dataset ${{ secrets.BQ_DATASET }} --bq-table ${{ secrets.BQ_TABLE }}
+        run: |
+          python wayback_cdx_sourcer.py \
+            --start-date ${{ matrix.year }}-${{ matrix.month }}-01 \
+            --bq-dataset ${{ secrets.BQ_DATASET }} \
+            --bq-table   ${{ secrets.BQ_TABLE }}
