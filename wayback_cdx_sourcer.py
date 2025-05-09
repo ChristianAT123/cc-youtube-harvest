@@ -15,8 +15,8 @@ PATTERNS = [
 
 def parse_args():
     p = argparse.ArgumentParser("Daily, paged CDX backfill")
-    p.add_argument("--start-date",  type=lambda s: datetime.datetime.strptime(s,"%Y-%m-%d").replace(tzinfo=timezone.utc), default=None)
-    p.add_argument("--end-date",    type=lambda s: datetime.datetime.strptime(s,"%Y-%m-%d").replace(tzinfo=timezone.utc), default=datetime.datetime.now(timezone.utc))
+    p.add_argument("--start-date",  type=lambda s: datetime.datetime.strptime(s,"%Y%m%d").replace(tzinfo=timezone.utc), default=None)
+    p.add_argument("--end-date",    type=lambda s: datetime.datetime.strptime(s,"%Y%m%d").replace(tzinfo=timezone.utc), default=datetime.datetime.now(timezone.utc))
     p.add_argument("--bq-dataset",   required=True)
     p.add_argument("--bq-table",     required=True)
     p.add_argument("--batch-size",   type=int, default=500)
@@ -82,7 +82,7 @@ def insert_rows(client, ds, tbl, rows):
 
 def main():
     args  = parse_args()
-    start = args.start_date or datetime.datetime(2018,1,1,tzinfo=timezone.utc)
+    start = args.start_date or datetime.datetime(20180101, tzinfo=timezone.utc)
     end   = args.end_date
     client = bigquery.Client()
     seen   = fetch_existing(client, args.bq_dataset, args.bq_table)
@@ -93,7 +93,7 @@ def main():
         print(f"\n=== Date: {day} ===")
         for mt, pat in PATTERNS:
             print(f"--- Pattern: {pat} ---")
-            page = 0
+            page = 1
             while True:
                 raws = fetch_page(pat, mt, day, page, args.page_size)
                 if not raws:
